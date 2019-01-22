@@ -1,6 +1,6 @@
 module mpas_moabmesh
 !  use, intrinsic :: ISO_C_BINDING
-
+#ifdef HAVE_MOAB
   use mpas_log     
   use mpas_derived_types, only: dm_info, domain_type
   use mpas_field_routines
@@ -214,4 +214,5 @@ module mpas_moabmesh
     
     
   end subroutine mpas_moab_instance
+#endif
 end module mpas_moabmesh
