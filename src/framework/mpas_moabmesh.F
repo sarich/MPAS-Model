@@ -10,12 +10,13 @@ module mpas_moabmesh
   !use mpas_vector_operations
 #include "moab/MOABConfig.h"
 
+  implicit none
+
 #ifdef MOAB_MPAS_INSIDE_E3SM
   use seq_comm_mct, only: MPOID, OCNID
 #else
   integer, public :: MPOID !   app id on moab side, for MPAS ocean
 #endif
-  implicit none
 
   contains
 
