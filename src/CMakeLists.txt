@@ -87,6 +87,7 @@ if (COMP_INTERFACE STREQUAL "moab")
   include(${MOAB_PATH}/lib/cmake/MOAB/MOABConfig.cmake)
   list(APPEND INCLUDES "${MOAB_PATH}/include")
   list(APPEND CPPDEFS "-DHAVE_MOAB")
+  list(APPEND CPPDEFS "-DMOAB_MPAS_INSIDE_E3SM")
 endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/operators/operators.cmake)
 
