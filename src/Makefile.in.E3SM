@@ -44,7 +44,7 @@ endif
 # Set MOAB info if it is being used
 ifeq ($(COMP_INTERFACE),moab)
   ifdef MOAB_PATH
-    CPPDEFS += -DHAVE_MOAB -DMOAB_MPAS_INSIDE_E3SM
+    CPPDEFS += -DHAVE_MOAB
     MOAB_INCLUDES = -I$(MOAB_PATH)/include
   else
     $(error MOAB_PATH must be defined when using moab driver)

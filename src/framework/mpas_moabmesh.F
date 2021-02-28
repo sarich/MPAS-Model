@@ -9,17 +9,7 @@ module mpas_moabmesh
   use mpas_pool_routines
   !use mpas_vector_operations
 #include "moab/MOABConfig.h"
-
-
-
-#ifdef MOAB_MPAS_INSIDE_E3SM
-  use seq_comm_mct, only: MPOID, OCNID
   implicit none
-#else
-  implicit none
-  integer, public :: MPOID !   app id on moab side, for MPAS ocean
-#endif
-
 
   contains
 
@@ -33,9 +23,11 @@ module mpas_moabmesh
   return
   end subroutine
   
-  subroutine mpas_moab_instance(domain)
+  subroutine mpas_moab_instance(domain, ext_comp_id, pidmoab)
     
     type (domain_type), intent(inout) :: domain
+    integer , intent(in) :: ext_comp_id
+    integer , Intent(inout) :: pidmoab
 
     type (block_type), pointer :: block
     type (mpas_pool_type), pointer :: meshPool
@@ -51,30 +43,25 @@ module mpas_moabmesh
     integer, pointer :: nCellsSolve, nEdgesSolve, nVerticesSolve
 
     integer , external :: iMOAB_RegisterFortranApplication, &
-        iMOAB_CreateVertices, iMOAB_WriteMesh, iMOAB_CreateElements, &
+        iMOAB_CreateVertices, iMOAB_CreateElements, &
         iMOAB_ResolveSharedEntities, iMOAB_DetermineGhostEntities, &
         iMOAB_DefineTagStorage,  iMOAB_SetIntTagStorage , &
         iMOAB_UpdateMeshInfo
     integer :: c_comm, i1, j1, ic, lastvertex
     character*12 appname
-    integer :: ierr, num_verts_in_cells, ext_comp_id
+    integer :: ierr, num_verts_in_cells
     real(kind=RKIND), allocatable, target :: moab_vert_coords(:)
     integer, allocatable, target :: indexUsed(:), invMap(:), localIds(:)
     integer dimcoord, dimen, mbtype, block_ID, proc_id
     integer  ,allocatable , target :: all_connects(:)
-    character*100 outfile, wopts, localmeshfile, lnum, tagname
+    character*100  tagname, lnum
     integer tagtype, numco, tag_sto_len, ent_type, tagindex, currentVertex
 
     c_comm = domain % dminfo % comm
-    appname = 'MPAS_MESH'//CHAR(0)
-    MPOID = -1 ! initialized negative , so we know if this register passes
-#ifdef MOAB_MPAS_INSIDE_E3SM
-    ext_comp_id = OCNID(1) ! should be 17
-#else
-    ext_comp_id = 17  ! some number less than 33 ! maybe this should be input
-#endif
+    write(lnum,"(I0.2)")ext_comp_id
+    appname = 'MPAS_MB_'//trim(lnum)// CHAR(0)
     ierr = iMOAB_RegisterFortranApplication(appname, c_comm, ext_comp_id, pid)
-    MPOID = pid ! this is exported, need for send to work
+    pidmoab = pid ! this is exported, need for send to work
     call errorout(ierr, 'fail to register MPAS_MOAB mesh')
     proc_id = domain % dminfo % my_proc_id
     call mpas_log_write('MOAB MPAS app pid:  $i  task  $i ', intArgs=(/pid, proc_id/) )
@@ -159,7 +146,7 @@ module mpas_moabmesh
 !  so we know we used only currentvertex vertices in the pool (the rest are in halo)
        mbtype = 4 !  polygon
 
-       block_ID = 100*proc_id + nblocks ! we should have only one block right now
+       block_ID = 100*ext_comp_id + proc_id + nblocks ! we should have only one block right now
 
        ierr = iMOAB_CreateElements( pid, nCellsSolve, mbtype, maxEdges, all_connects, block_ID );
        call errorout(ierr, 'fail to create polygons')
@@ -183,15 +170,15 @@ module mpas_moabmesh
        ierr = iMOAB_SetIntTagStorage ( pid, tagname, nCellsSolve, ent_type, indexToCellID)
        call errorout(ierr, 'fail to set global id tag for polygons')
        ! get next block
-#ifdef MPAS_DEBUG
-       if (proc_id.lt. 5) then
-         write(lnum,"(I0.2)")proc_id
-         localmeshfile = 'ownedOcn_'//trim(lnum)// '.h5m' // CHAR(0)
-         wopts = CHAR(0)
-         ierr = iMOAB_WriteMesh(pid, localmeshfile, wopts)
-         call errorout(ierr, 'fail to write local mesh file')
-       endif
-#endif
+!#ifdef MPAS_DEBUG
+!       if (proc_id.lt. 5) then
+!         write(lnum,"(I0.2)")proc_id
+!         localmeshfile = 'ownedOcn_'//trim(lnum)// '.h5m' // CHAR(0)
+!         wopts = CHAR(0)
+!         ierr = iMOAB_WriteMesh(pid, localmeshfile, wopts)
+!         call errorout(ierr, 'fail to write local mesh file')
+!       endif
+!#endif
        ierr = iMOAB_ResolveSharedEntities( pid, currentVertex, localIds );
        call errorout(ierr, 'fail to resolve shared entities')
 
@@ -210,11 +197,7 @@ module mpas_moabmesh
     endif 
     ierr = iMOAB_UpdateMeshInfo(pid)
     call errorout(ierr, 'fail to update mesh info')
-    !     write out the mesh file to disk, in parallel
-    outfile = 'wholeMPAS.h5m'//CHAR(0)
-    wopts   = 'PARALLEL=WRITE_PART'//CHAR(0)
-    ierr = iMOAB_WriteMesh(pid, outfile, wopts)
-    call errorout(ierr, 'fail to write the mesh file')
+
     
     
   end subroutine mpas_moab_instance
