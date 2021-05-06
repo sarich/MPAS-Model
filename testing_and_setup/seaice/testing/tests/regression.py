@@ -1,12 +1,10 @@
-#!/usr/bin/env python
-
 import os, shutil
 from compare_mpas_files import compare_files
 from testing_utils import *
 
 #-------------------------------------------------------------------------
 
-def regression(mpasDevelopmentDir, mpasBaseDir, domainsDir, domain, configuration, options, check):
+def regression(mpasDevelopmentDir, mpasBaseDir, domainsDir, domain, configuration, options, check, oversubscribe, np1, np2):
 
     # find available directory name
     iTest = 1
@@ -27,7 +25,7 @@ def regression(mpasDevelopmentDir, mpasBaseDir, domainsDir, domain, configuratio
     logfile.write(title)
 
     # development run
-    nProcs = 16
+    nProcs = np1
 
     nmlChanges = {"seaice_model": {"config_run_duration":'24:00:00'}}
     if (check):
@@ -36,13 +34,13 @@ def regression(mpasDevelopmentDir, mpasBaseDir, domainsDir, domain, configuratio
     streamChanges = [{"streamName":"restart", "attributeName":"output_interval", "newValue":"24:00:00"}, \
                      {"streamName":"output" , "attributeName":"output_interval", "newValue":"none"}]
 
-    if (run_model("development", mpasDevelopmentDir, domainsDir, domain, configuration, nmlChanges, streamChanges, nProcs, logfile) != 0):
+    if (run_model("development", mpasDevelopmentDir, domainsDir, domain, configuration, nmlChanges, streamChanges, nProcs, logfile, oversubscribe) != 0):
         run_failed("regression")
         os.chdir("..")
         return 1
 
     # base run
-    nProcs = 16
+    nProcs = np1
 
     nmlChanges = {"seaice_model": {"config_run_duration":'24:00:00'}}
     if (check):
@@ -51,7 +49,7 @@ def regression(mpasDevelopmentDir, mpasBaseDir, domainsDir, domain, configuratio
     streamChanges = [{"streamName":"restart", "attributeName":"output_interval", "newValue":"24:00:00"}, \
                      {"streamName":"output" , "attributeName":"output_interval", "newValue":"none"}]
 
-    if (run_model("base", mpasBaseDir, domainsDir, domain, configuration, nmlChanges, streamChanges, nProcs, logfile) != 0):
+    if (run_model("base", mpasBaseDir, domainsDir, domain, configuration, nmlChanges, streamChanges, nProcs, logfile, oversubscribe) != 0):
         run_failed("regression")
         os.chdir("..")
         return 1

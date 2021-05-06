@@ -1,4 +1,4 @@
-!  SVN:$Id: ice_therm_itd.F90 1182 2017-03-16 19:29:26Z njeffery $
+!  SVN:$Id: ice_therm_itd.F90 1196 2017-04-18 13:32:23Z eclare $
 !=======================================================================
 !
 ! Thermo calculations after call to coupler, related to ITD:
@@ -23,7 +23,7 @@
       use ice_kinds_mod
       use ice_constants_colpkg, only: c0, c1, c2, c3, c4, c6, c10, &
           p001, p1, p333, p5, p666, puny, bignum, &
-          rhos, rhoi, Lfresh, ice_ref_salinity
+          rhos, rhoi, Lfresh, ice_ref_salinity, rhosmin
       use ice_warnings, only: add_warning
       
       
@@ -66,22 +66,23 @@
 ! authors: William H. Lipscomb, LANL
 !          Elizabeth C. Hunke, LANL
 
-      subroutine linear_itd (ncat,        hin_max,     &
-                             nilyr,       nslyr,       &
-                             ntrcr,       trcr_depend, & 
+      subroutine linear_itd (ncat,        hin_max,      &
+                             nilyr,       nslyr,        &
+                             ntrcr,       trcr_depend,  & 
                              trcr_base,   n_trcr_strata,&
-                             nt_strata,                &
-                             aicen_init,  vicen_init,  & 
-                             aicen,       trcrn,       & 
-                             vicen,       vsnon,       & 
-                             aice,        aice0,       & 
-                             fpond,       l_stop,      &
+                             nt_strata,   Tf,           &
+                             aicen_init,  vicen_init,   & 
+                             aicen,       trcrn,        & 
+                             vicen,       vsnon,        & 
+                             aice,        aice0,        & 
+                             fpond,       l_stop,       &
                              stop_label)
 
       use ice_itd, only: aggregate_area, shift_ice, & 
                          column_sum, column_conservation_check
       use ice_colpkg_tracers, only: nt_qice, nt_qsno, nt_fbri, nt_sice, &
-                             tr_pond_topo, nt_apnd, nt_hpnd, tr_brine
+                             tr_pond_topo, nt_apnd, nt_hpnd, tr_brine, &
+                             nt_rhos, tr_snow
       use ice_therm_shared, only: hi_min
 
       integer (kind=int_kind), intent(in) :: &
@@ -90,7 +91,10 @@
          nslyr   , & ! number of snow layers
          ntrcr       ! number of tracers in use
 
-      real (kind=dbl_kind), dimension(0:ncat), intent(inout) :: &
+      real (kind=dbl_kind), intent(in) :: &
+         Tf          ! ocean freezing temperature (C)
+
+      real (kind=dbl_kind), dimension(0:ncat), intent(in) :: &
          hin_max      ! category boundaries (m)
 
       integer (kind=int_kind), dimension (:), intent(in) :: &
@@ -197,8 +201,6 @@
 
       l_stop = .false.
 
-      hin_max(ncat) = 999.9_dbl_kind ! arbitrary big number
-
       do n = 1, ncat
          donor(n) = 0
          daice(n) = c0
@@ -230,7 +232,7 @@
 
          if (tr_brine) then
             vbrin(n) = vbrin(n) + trcrn(nt_fbri,n) &
-                     * vicen(n)/real(nilyr,kind=dbl_kind)
+                     * vicen(n)
          endif
 
          do k = 1, nilyr
@@ -542,12 +544,21 @@
                trcrn(k,n) = trcrn(k,n) + rhos*Lfresh
             enddo
          enddo
- 
+         ! maintain rhos_cmp positive definiteness
+         if (tr_snow) then
+         do n = 1, ncat
+            do k = nt_rhos, nt_rhos+nslyr-1
+               trcrn(k,n) = max(trcrn(k,n)-rhosmin, c0)
+!               trcrn(k,n) = trcrn(k,n) - rhosmin
+            enddo
+         enddo
+         endif
+  
          call shift_ice (ntrcr,    ncat,        &
                          trcr_depend,           &
                          trcr_base,             &
                          n_trcr_strata,         &
-                         nt_strata,             &
+                         nt_strata,   Tf,       &
                          aicen,    trcrn,       &
                          vicen,    vsnon,       &
                          hicen,    donor,       &
@@ -561,6 +572,14 @@
                trcrn(k,n) = trcrn(k,n) - rhos*Lfresh
             enddo
          enddo
+         ! maintain rhos_cmp positive definiteness
+         if (tr_snow) then
+         do n = 1, ncat
+            do k = nt_rhos, nt_rhos+nslyr-1
+               trcrn(k,n) = trcrn(k,n) + rhosmin
+            enddo
+         enddo
+         endif
 
       !-----------------------------------------------------------------
       ! Make sure hice(1) >= minimum ice thickness hi_min.
@@ -609,7 +628,7 @@
 
          if (tr_brine) then
             vbrin(n) = vbrin(n) + trcrn(nt_fbri,n) &
-                     * vicen(n)/real(nilyr,kind=dbl_kind)
+                     * vicen(n)
          endif
 
          do k = 1, nilyr
@@ -840,7 +859,7 @@
       use ice_colpkg_tracers, only: nt_qice, nt_qsno, nt_aero, tr_aero, &
                              tr_pond_topo, nt_apnd, nt_hpnd, bio_index
       use ice_colpkg_shared, only: z_tracers , hs_ssl, solve_zsal
-      use ice_zbgc, only: lateral_melt_bgc               
+      use ice_zbgc, only: lateral_melt_bgc
 
       real (kind=dbl_kind), intent(in) :: &
          dt        ! time step (s)
@@ -874,7 +893,7 @@
   
       real (kind=dbl_kind), dimension(nbtrcr), &
          intent(inout) :: &
-         flux_bio  ! biology tracer flux from layer bgc (mmol/m^2/s)  
+         flux_bio  ! biology tracer flux from layer bgc (mmol/m^2/s)
 
       real (kind=dbl_kind), dimension(:), intent(inout) :: &
          faero_ocn     ! aerosol flux to ocean (kg/m^2/s)
@@ -958,10 +977,10 @@
 
       !-----------------------------------------------------------------
       ! Biogeochemistry
-      !-----------------------------------------------------------------     
+      !-----------------------------------------------------------------
 
             if (z_tracers) then   ! snow tracers
-               dvssl  = min(p5*vsnon(n), hs_ssl*aicen(n))       !snow surface layer
+               dvssl  = min(p5*vsnon(n)/real(nslyr,kind=dbl_kind), hs_ssl*aicen(n))       !snow surface layer
                dvint  = vsnon(n)- dvssl                         !snow interior
                do k = 1, nbtrcr
                   flux_bio(k) = flux_bio(k) &
@@ -976,9 +995,10 @@
          if (solve_zsal .or. z_tracers) &
             call lateral_melt_bgc(dt,                         &
                                   ncat,        nblyr,         &
-                                  rside,       vicen_init,    &
+                                  rside,       vicen,         &
                                   trcrn,       fzsal,         &
-                                  flux_bio,    nbtrcr)
+                                  flux_bio,    nbtrcr,        &
+                                  vicen_init)
 
       endif          ! rside
 
@@ -1006,7 +1026,7 @@
 !
       subroutine add_new_ice (ncat,      nilyr,    nblyr,  &
                               n_aero,    dt,         &
-                              ntrcr,     nltrcr,            &
+                              ntrcr,     nbtrcr,     &
                               hin_max,   ktherm,     &
                               aicen,     trcrn,      &
                               vicen,     vsnon1,     &
@@ -1018,8 +1038,8 @@
                               Tf,        sss,        &
                               salinz,    phi_init,   &
                               dSin0_frazil,          &
-                              bgrid,      cgrid,      igrid,    &
-                              nbtrcr,    flux_bio,   &
+                              bgrid,     cgrid,      &
+                              igrid,     flux_bio,   &
                               ocean_bio, fzsal,      &
                               frazil_diag,           &
                               l_stop,    stop_label)
@@ -1041,7 +1061,7 @@
          nilyr , & ! number of ice layers
          nblyr , & ! number of bio layers
          ntrcr , & ! number of tracers
-         nltrcr, & ! number of zbgc tracers
+         nbtrcr, & ! number of bio tracer types
          n_aero, & ! number of aerosol tracers
          ktherm    ! type of thermodynamics (0 0-layer, 1 BL99, 2 mushy)
 
@@ -1103,9 +1123,6 @@
       real (kind=dbl_kind), dimension (nilyr+1), intent(in) :: &
          cgrid              ! CICE vertical coordinate   
 
-      integer (kind=int_kind), intent(in) :: &
-         nbtrcr          ! number of biology tracers
-
       real (kind=dbl_kind), dimension (:), intent(inout) :: &
          flux_bio   ! tracer flux to ocean from biology (mmol/m^2/s) 
         
@@ -1165,7 +1182,10 @@
          vbri_final      ! brine volume summed over categories
 
       real (kind=dbl_kind), dimension (ncat) :: &
-         vbrin           ! trcrn(nt_fbri,n)*vicen(n) 
+         vbrin             ! trcrn(nt_fbri,n)*vicen(n)
+
+      character(len=char_len_long) :: &
+         warning ! warning message
 
       !-----------------------------------------------------------------
       ! initialize
@@ -1490,12 +1510,12 @@
       !-----------------------------------------------------------------     
      if (tr_brine .or. nbtrcr > 0) &
         call add_new_ice_bgc(dt,         nblyr,                &
-                             ncat, nilyr, nltrcr, &
+                             ncat,       nilyr,      nbtrcr,   &
                              bgrid,      cgrid,      igrid,    &
                              aicen_init, vicen_init, vi0_init, &
                              aicen,      vicen,      vsnon1,   &
                              vi0new,     ntrcr,      trcrn,    &
-                             nbtrcr,     sss,        ocean_bio,&
+                             sss,        ocean_bio,            &
                              flux_bio,   hsurp,                &
                              l_stop,     stop_label,           &
                              l_conservation_check)

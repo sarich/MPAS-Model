@@ -1,12 +1,10 @@
-#!/usr/bin/env python
-
 import os, shutil
 from compare_mpas_files import compare_files
 from testing_utils import *
 
 #-------------------------------------------------------------------------
 
-def restartability(mpasDevelopmentDir, domainsDir, domain, configuration, options, check):
+def restartability(mpasDevelopmentDir, domainsDir, domain, configuration, options, check, oversubscribe, np1, np2):
 
     # find available directory name
     iTest = 1
@@ -27,7 +25,7 @@ def restartability(mpasDevelopmentDir, domainsDir, domain, configuration, option
     logfile.write(title)
 
     # base run
-    nProcs = 16
+    nProcs = np1
 
     nmlChanges = {"seaice_model": {"config_run_duration":'24:00:00'}}
     if (check):
@@ -36,13 +34,13 @@ def restartability(mpasDevelopmentDir, domainsDir, domain, configuration, option
     streamChanges = [{"streamName":"restart", "attributeName":"output_interval", "newValue":"24:00:00"}, \
                      {"streamName":"output" , "attributeName":"output_interval", "newValue":"none"}]
 
-    if (run_model("base", mpasDevelopmentDir, domainsDir, domain, configuration, nmlChanges, streamChanges, nProcs, logfile) != 0):
+    if (run_model("base", mpasDevelopmentDir, domainsDir, domain, configuration, nmlChanges, streamChanges, nProcs, logfile, oversubscribe) != 0):
         run_failed("restartability")
         os.chdir("..")
         return 1
 
     # first restart run
-    nProcs = 16
+    nProcs = np1
 
     nmlChanges = {"seaice_model": {"config_run_duration":'12:00:00'}}
     if (check):
@@ -51,32 +49,43 @@ def restartability(mpasDevelopmentDir, domainsDir, domain, configuration, option
     streamChanges = [{"streamName":"restart", "attributeName":"output_interval", "newValue":"12:00:00"}, \
                      {"streamName":"output" , "attributeName":"output_interval", "newValue":"none"}]
 
-    if (run_model("restart", mpasDevelopmentDir, domainsDir, domain, configuration, nmlChanges, streamChanges, nProcs, logfile) != 0):
+    if (run_model("restart", mpasDevelopmentDir, domainsDir, domain, configuration, nmlChanges, streamChanges, nProcs, logfile, oversubscribe) != 0):
         run_failed("restartability")
         os.chdir("..")
         return 1
 
     # restart
-    nProcs = 32
+    nProcs = np2
 
     bgcRestart = False
     if ("bgc" in options.keys() and options["bgc"] == "True"):
         bgcRestart = True
 
+    snowModsRestart = False
+    if ("snow_tracer_physics" in options.keys() and options["snow_tracer_physics"] == "True"):
+        snowModsRestart = True
+
     if (not bgcRestart):
-        nmlChanges = {"seaice_model": {"config_start_time":"file"},
-                      "restart": {"config_do_restart":True}}
+        if (not snowModsRestart):
+             nmlChanges = {"seaice_model": {"config_start_time":"file"},
+                           "restart": {"config_do_restart":True}}
+        else:
+             nmlChanges = {"seaice_model": {"config_start_time":"file"},
+                      "restart": {"config_do_restart":True,
+                                  "config_do_restart_snow_density":True,
+                                  "config_do_restart_snow_grain_radius":True}}
     else:
         nmlChanges = {"seaice_model": {"config_start_time":"file"},
                       "restart": {"config_do_restart":True,
                                   "config_do_restart_bgc":True,
                                   "config_do_restart_hbrine":True}}
+
     if (check):
         nmlChanges["unit_test"] = {"config_testing_system_test":True}
 
     streamChanges = []
 
-    if (restart_model("restart", nmlChanges, streamChanges, nProcs, logfile) != 0):
+    if (restart_model("restart", nmlChanges, streamChanges, nProcs, logfile, oversubscribe) != 0):
         run_failed("restartability")
         os.chdir("..")
         return 1

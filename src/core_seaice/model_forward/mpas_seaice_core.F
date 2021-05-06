@@ -1,10 +1,3 @@
-! Copyright (c) 2013,  Los Alamos National Security, LLC (LANS)
-! and the University Corporation for Atmospheric Research (UCAR).
-!
-! Unless noted otherwise source code is licensed under the BSD license.
-! Additional copyright and license information can be found in the LICENSE file
-! distributed with this code, or at http://mpas-dev.github.com/license.html
-!
 module seaice_core
 
    use mpas_framework
@@ -12,6 +5,7 @@ module seaice_core
    use seaice_analysis_driver
    use seaice_column
    use mpas_threading
+   use mpas_timer, only: mpas_timer_start, mpas_timer_stop
    use mpas_log, only: mpas_log_write
 
    private
@@ -131,7 +125,10 @@ module seaice_core
       ! bootstrap analysis has used config_do_restart: now modify for rest of code
       if (trim(config_initial_condition_type) == "restart") config_do_restart = .true.
 
+      call mpas_timer_start("seaice_init")
       call mpas_init_block(domain, dt)
+      call mpas_timer_stop("seaice_init")
+
 
    end function seaice_core_init
 
@@ -262,7 +259,6 @@ module seaice_core
       use mpas_derived_types
       use mpas_kind_types
       use mpas_stream_manager
-      use mpas_timer
       use seaice_time_integration, only: seaice_timestep_finalize
       use seaice_forcing, only: &
            seaice_forcing_get, &
@@ -391,8 +387,7 @@ module seaice_core
    subroutine mpas_timestep(domain, itimestep, timeStamp)
 
       use mpas_derived_types
-      use seaice_time_integration
-      use seaice_error, only: seaice_check_critical_error
+      use seaice_time_integration, only: seaice_timestep
 
       implicit none
 
@@ -400,12 +395,7 @@ module seaice_core
       integer, intent(in) :: itimestep
       character(len=*), intent(in) :: timeStamp
 
-      integer :: ierr
-
-      ierr = 0
-      call seaice_timestep(domain, clock, itimestep, ierr)
-
-      call seaice_check_critical_error(domain, ierr)
+      call seaice_timestep(domain, clock, itimestep)
 
    end subroutine mpas_timestep
 
@@ -427,6 +417,8 @@ module seaice_core
       use mpas_decomp
       use seaice_column, only: &
            seaice_column_finalize
+      use seaice_mesh_pool, only: &
+           seaice_mesh_pool_destroy
 
       implicit none
 
@@ -434,6 +426,9 @@ module seaice_core
       integer :: ierr
 
       iErr = 0
+
+      call mpas_log_write(" Destruct mesh pool...")
+      call seaice_mesh_pool_destroy(iErr)
 
       ! finalize column
       call seaice_column_finalize(domain)

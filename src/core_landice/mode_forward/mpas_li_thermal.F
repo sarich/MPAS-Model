@@ -51,8 +51,9 @@ module li_thermal
    public :: li_thermal_init, li_thermal_solver, &
              li_init_linear_temperature_in_column,  &
              li_temperature_to_enthalpy, li_enthalpy_to_temperature, &
+             li_temperature_to_enthalpy_kelvin, li_enthalpy_to_temperature_kelvin, &
              li_compute_pressure_melting_point_fields, &
-             li_basal_melt_floating_ice
+             li_basal_friction, li_heat_dissipation_sia
 
    !--------------------------------------------------------------------
    !
@@ -150,11 +151,12 @@ module li_thermal
 
       real (kind=RKIND), dimension(:), pointer :: &
            thickness, &                ! ice thickness
-           upperSurface                ! ice upper surface
+           upperSurface, &               ! ice upper surface
+           basalWaterThickness
 
       real (kind=RKIND), dimension(:,:), pointer :: &
            temperature,              & ! interior ice temperature (K)
-           waterfrac,                & ! interior water fraction (unitless)
+           waterFrac,                & ! interior water fraction (unitless)
            enthalpy                    ! interior ice enthalpy (J m^{-3})
 
       real (kind=RKIND), dimension(:), pointer :: &
@@ -237,10 +239,11 @@ module li_thermal
          ! get arrays from the geometry pool
          call mpas_pool_get_array(geometryPool, 'thickness', thickness)
          call mpas_pool_get_array(geometryPool, 'upperSurface', upperSurface)
+         call mpas_pool_get_array(geometryPool, 'basalWaterThickness', basalWaterThickness)
 
          ! get arrays from the thermal pool
          call mpas_pool_get_array(thermalPool, 'temperature', temperature)
-         call mpas_pool_get_array(thermalPool, 'waterfrac', waterfrac)
+         call mpas_pool_get_array(thermalPool, 'waterFrac', waterFrac)
          call mpas_pool_get_array(thermalPool, 'enthalpy', enthalpy)
          call mpas_pool_get_array(thermalPool, 'surfaceAirTemperature', surfaceAirTemperature)
          call mpas_pool_get_array(thermalPool, 'surfaceTemperature', surfaceTemperature)
@@ -369,26 +372,14 @@ module li_thermal
          ! The default is (1).
          ! If restarting, we always do (3).
          ! If (2) or (3), then the temperature should already have been read in, and there is
-         !  nothing to do here (except possibly to set waterfrac).
+         !  nothing to do here (except possibly to set waterFrac).
 
-         if (config_do_restart) then
+         if (config_do_restart .or. (trim(config_temperature_init) == 'file')) then
 
             ! nothing to do; temperature was read from the restart file
-            !TODO - Make sure waterfrac is also read, if needed
             if (config_print_thermal_info) then
-               call mpas_log_write('Initialized ice temperature from the restart file')
+               call mpas_log_write('Initialized ice temperature (and waterFrac if required) from file.')
             endif
-
-         elseif (trim(config_temperature_init) == 'file') then
-
-            ! Temperature was read from the input file
-            if (config_print_thermal_info) then
-               call mpas_log_write('Initialized ice temperature from the input file')
-            endif
-
-            ! initialize waterfrac, in case we are using the enthalpy solver
-            !TODO - Allow waterfrac to be read from the input file?
-            waterfrac(:,:) = 0.0_RKIND
 
          elseif (trim(config_temperature_init) == 'sfc_air_temperature') then
 
@@ -409,7 +400,7 @@ module li_thermal
             enddo
             deallocate(pmpTemperatureCol)
 
-            waterfrac(:,:) = 0.0_RKIND
+            waterFrac(:,:) = 0.0_RKIND
 
             if (config_print_thermal_info) then
                call mpas_log_write('Initialized ice column temperature to the surface air temperature')
@@ -432,7 +423,7 @@ module li_thermal
                     thickness(iCell),              &
                     surfaceAirTemperature(iCell),  &
                     temperature(:,iCell),          &
-                    waterfrac(:,iCell),            &
+                    waterFrac(:,iCell),            &
                     surfaceTemperature(iCell),     &
                     basalTemperature(iCell))
 
@@ -506,8 +497,8 @@ module li_thermal
       call mpas_dmpar_field_halo_exch(domain, 'temperature')
 
       if (trim(config_thermal_solver) == 'enthalpy') then
-         ! prognostic variables are temperature and waterfrac, so need to update waterfrac too
-         call mpas_dmpar_field_halo_exch(domain, 'waterfrac')
+         ! prognostic variables are temperature and waterFrac, so need to update waterFrac too
+         call mpas_dmpar_field_halo_exch(domain, 'waterFrac')
       endif
 
       call mpas_timer_stop("halo updates")
@@ -542,7 +533,7 @@ module li_thermal
          thickness,              &
          surfaceAirTemperature,  &
          temperature,            &
-         waterfrac,              &
+         waterFrac,              &
          surfaceTemperature,     &
          basalTemperature)
 
@@ -566,7 +557,7 @@ module li_thermal
 
       real(kind=RKIND), dimension(nVertLevels), intent(out) ::  &
            temperature,     &           !< Output: interior ice temperature at midpoint of each layer
-           waterfrac                    !< Output: interior water fraction at midpoint of each layer
+           waterFrac                    !< Output: interior water fraction at midpoint of each layer
 
       real(kind=RKIND), intent(out) ::  &
            surfaceTemperature,     &    !< Output: surface ice temperature
@@ -620,8 +611,8 @@ module li_thermal
 
       temperature(:) = min(temperature(:), pmptemp(:) - pmpt_offset)
 
-      ! set waterfrac = 0
-      waterfrac(:) = 0.0_RKIND
+      ! set waterFrac = 0
+      waterFrac(:) = 0.0_RKIND
 
     end subroutine li_init_linear_temperature_in_column
 
@@ -731,7 +722,7 @@ module li_thermal
 
       real (kind=RKIND), dimension(:,:), pointer :: &
            temperature,              & ! interior ice temperature (K)
-           waterfrac,                & ! interior water fraction (unitless)
+           waterFrac,                & ! interior water fraction (unitless)
            enthalpy,                 & ! interior ice enthalpy (J m^{-3})
            heatDissipation             ! interior heat dissipation (deg/s)
 
@@ -836,7 +827,7 @@ module li_thermal
 
          ! get fields from the thermal pool
          call mpas_pool_get_array(thermalPool, 'temperature', temperature)
-         call mpas_pool_get_array(thermalPool, 'waterfrac', waterfrac)
+         call mpas_pool_get_array(thermalPool, 'waterFrac', waterFrac)
          call mpas_pool_get_array(thermalPool, 'enthalpy', enthalpy)
          call mpas_pool_get_array(thermalPool, 'surfaceTemperature', surfaceTemperature)
          call mpas_pool_get_array(thermalPool, 'basalTemperature',   basalTemperature)
@@ -877,19 +868,9 @@ module li_thermal
          enddo
 
 
-         ! === Calculate mechanical heating terms ===
-
-         if (trim(config_velocity_solver) == 'sia') then
-            ! Compute interior heat dissipation
-            call heat_dissipation_sia(domain, err_tmp)
-            err = ior(err, err_tmp)
-         endif   ! sia
-         ! (FO dissipation is calculated within dycore)
-
-         ! Compute heat flux due to basal friction
-         !   appropriate for SIA or FO dycore, assuming Taub=beta*ub
-         call basal_friction(domain, err_tmp)
-         err = ior(err, err_tmp)
+         ! === mechanical heating terms now calculated in li_velocity_solve ===
+         ! (this makes restarts easier because just heatDissipation and basalFrictionFlux
+         !  need to be restart variables, rather than all of their inputs.)
 
 
          ! === Update surfaceTemperature if using a lapse rate ===
@@ -969,13 +950,13 @@ module li_thermal
 
                   if (trim(config_thermal_solver) == 'enthalpy') then
 
-                     ! Given temperature and waterfrac in ice interior, compute enthalpy
+                     ! Given temperature and waterFrac in ice interior, compute enthalpy
 
                      call li_temperature_to_enthalpy(&
                           layerCenterSigma,      &
                           thickness(iCell),      &
                           temperature(:,iCell),  &
-                          waterfrac(:,iCell),    &
+                          waterFrac(:,iCell),    &
                           enthalpy(:,iCell))
 
                      surfaceEnthalpy = surfaceTemperature(iCell) * rhoi*cp_ice
@@ -985,11 +966,11 @@ module li_thermal
                         call mpas_log_write(' ')
                         call mpas_log_write('Before prognostic enthalpy, iCell = $i', intArgs=(/indexToCellID(iCell)/))
                         call mpas_log_write('thickness = $r', realArgs=(/thickness(iCell)/))
-                        call mpas_log_write('Temperature (C), waterfrac, enthalpy/(rhoi*cp_ice):')
+                        call mpas_log_write('Temperature (C), waterFrac, enthalpy/(rhoi*cp_ice):')
                         call mpas_log_write('0 $r', realArgs=(/surfaceEnthalpy/(rhoi*cp_ice)/))
                         do k = 1, nVertLevels
                            call mpas_log_write('$i $r $r $r', intArgs=(/k/), realArgs= &
-                              (/temperature(k,iCell), waterfrac(k,iCell), enthalpy(k,iCell)/(rhoi*cp_ice)/))
+                              (/temperature(k,iCell), waterFrac(k,iCell), enthalpy(k,iCell)/(rhoi*cp_ice)/))
                         enddo
                         call mpas_log_write('$i $r', intArgs=(/nVertLevels+1/), realArgs=(/basalEnthalpy/(rhoi*cp_ice)/))
                      endif
@@ -1013,7 +994,7 @@ module li_thermal
                           temperature(:,iCell),           &
                           surfaceTemperature(iCell),      &
                           basalTemperature(iCell),        &
-                          waterfrac(:,iCell),             &
+                          waterFrac(:,iCell),             &
                           enthalpy(:,iCell),              &
                           heatDissipation(:,iCell),       &
                           basalHeatFlux(iCell),           &
@@ -1066,28 +1047,37 @@ module li_thermal
                      basalConductiveFlux(iCell) = -diffusivity(nVertLevels+1)/thickness(iCell) * &
                         denth_bot/(1.0_RKIND - layerCenterSigma(nVertLevels))
 
-                     ! convert enthalpy in ice interior back to temperature and waterfrac
+                     ! convert enthalpy in ice interior back to temperature and waterFrac
 
                      call li_enthalpy_to_temperature(&
                           layerCenterSigma,          &
                           thickness(iCell),          &
                           enthalpy(:,iCell),         &
                           temperature(:,iCell),      &
-                          waterfrac(:,iCell),        &
+                          waterFrac(:,iCell),        &
                           surfaceEnthalpy,           &
                           surfaceTemperature(iCell), &
                           basalEnthalpy,             &
                           basalTemperature(iCell))
 
+                     basalConductiveFlux(iCell) = -iceConductivity/thickness(iCell) * &
+                        (basalTemperature(iCell)-temperature(nVertLevels,iCell))/(1.0_RKIND - layerCenterSigma(nVertLevels))
+                    ! TZ: The basal conductive flux should be calculated using temperature, not
+                    ! enthalpy. If we use enthalpy, basalConductiveFlux will always equals to basal heat flux, causing problem
+                    ! At ice surface, it is unlikely there will be temperate ice. In addition, we can't know exactly the water
+                    ! fraction if the ice is temperate at surface. So in this case we will just use enthalpy and don't consider
+                    ! the latent heat of water.
+
+
                      if (verboseColumn) then
                         call mpas_log_write(' ')
                         call mpas_log_write('After prognostic enthalpy, iCell = $i', intArgs=(/indexToCellID(iCell)/))
                         call mpas_log_write('thickness = $r', realArgs=(/thickness(iCell)/))
-                        call mpas_log_write('Temperature, waterfrac, enthalpy/(rhoi*cp_ice):')
+                        call mpas_log_write('Temperature, waterFrac, enthalpy/(rhoi*cp_ice):')
                         call mpas_log_write('0 $r', realArgs=(/surfaceEnthalpy/(rhoi*cp_ice)/))
                         do k = 1, nVertLevels
                            call mpas_log_write('$i $r $r $r', intArgs=(/k/), realArgs= &
-                              (/temperature(k,iCell), waterfrac(k,iCell), enthalpy(k,iCell)/(rhoi*cp_ice)/))
+                              (/temperature(k,iCell), waterFrac(k,iCell), enthalpy(k,iCell)/(rhoi*cp_ice)/))
                         enddo
                         call mpas_log_write('$i $r', intArgs=(/nVertLevels+1/), realArgs=(/basalEnthalpy/(rhoi*cp_ice)/))
                      endif
@@ -1246,8 +1236,8 @@ module li_thermal
                      endif   ! verboseColumn
 
                      call mpas_log_write('li_thermal, energy conservation error: iCell=$i, imbalance=$r (W/m2):', MPAS_LOG_WARN, &
-                                         intArgs=(/indexToCellID(iCell)/), realArgs=(/(finalEnergy - initialEnergy - deltaEnergy)/deltat/))
-                     err = 0
+                             intArgs=(/indexToCellID(iCell)/), realArgs=(/(finalEnergy - initialEnergy - deltaEnergy)/deltat/))
+                     !err = ior(err, 1)
 
                   endif  ! energy conservation error
 
@@ -1260,7 +1250,7 @@ module li_thermal
                   surfaceTemperature(iCell) = 0.0_RKIND
                   basalTemperature(iCell) = 0.0_RKIND
                   temperature(:,iCell) = 0.0_RKIND
-                  waterfrac(:,iCell) = 0.0_RKIND
+                  waterFrac(:,iCell) = 0.0_RKIND
                   enthalpy(:,iCell) = 0.0_RKIND
 
                endif   ! thickness > config_thermal_thickness
@@ -1289,7 +1279,7 @@ module li_thermal
                  thickness,                    &
                  temperature,                  &
                  basalTemperature,             &
-                 waterfrac,                    &
+                 waterFrac,                    &
                  enthalpy,                     &
                  basalFrictionFlux,            &
                  basalHeatFlux,                &
@@ -1335,6 +1325,9 @@ module li_thermal
 
             enddo   ! iCell
 
+         case default
+            call mpas_log_write("Unknown thermal solver specified: " // trim(config_thermal_solver), MPAS_LOG_ERR)
+            err = ior(err, 1)
          end select   ! config_thermal_solver
 
          ! It is possible that internal melting was computed above for floating ice and assigned
@@ -1378,8 +1371,8 @@ module li_thermal
       call mpas_dmpar_field_halo_exch(domain, 'temperature')
 
       if (trim(config_thermal_solver) == 'enthalpy') then
-         ! prognostic variables are temperature and waterfrac, so need to update waterfrac too
-         call mpas_dmpar_field_halo_exch(domain, 'waterfrac')
+         ! prognostic variables are temperature and waterFrac, so need to update waterFrac too
+         call mpas_dmpar_field_halo_exch(domain, 'waterFrac')
       endif
 
       call mpas_timer_stop("halo updates")
@@ -1391,210 +1384,10 @@ module li_thermal
 
     end subroutine li_thermal_solver
 
-!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-!
-!  !  routine li_basal_melt_floating_ice
-!
-!> \brief MPAS land ice solver for basal melt of floating ice
-!> \author William Lipscomb
-!> \date   November 2015
-!> \details
-!>  This routine computes basal melting for floating ice.
-!>  The following options are supported:
-!>  (1) Do nothing (config_basal_mass_bal_float = 'none')
-!>  (2) Read melt rate from a file (config_basal_mass_bal_float = 'file')
-!>  (2) Prescribed constant basal melt rate (config_basal_mass_bal_float = 'constant')
-!>  (3) Basal melt rate as in MISMIP+ (config_basal_mass_bal_float = 'mismip')
-
-!-----------------------------------------------------------------------
-
-   subroutine li_basal_melt_floating_ice(domain, err)
-
-      !-----------------------------------------------------------------
-      ! input variables
-      !-----------------------------------------------------------------
-
-      !-----------------------------------------------------------------
-      ! input/output variables
-      !-----------------------------------------------------------------
-      type (domain_type), intent(inout) :: &
-         domain          !< Input/Output: domain object
-
-      !-----------------------------------------------------------------
-      ! output variables
-      !-----------------------------------------------------------------
-      integer, intent(out) :: err !< Output: error flag
-
-      !-----------------------------------------------------------------
-      ! local variables
-      !-----------------------------------------------------------------
-
-      type (block_type), pointer :: block
-
-      type (mpas_pool_type), pointer :: meshPool
-      type (mpas_pool_type), pointer :: geometryPool
-      type (mpas_pool_type), pointer :: velocityPool   ! needed for mask subroutine
-      type (mpas_pool_type), pointer :: scratchPool
-
-      integer, pointer :: &
-           nCellsSolve                 ! number of locally owned cells
-
-      logical, pointer :: &
-           config_print_thermal_info   ! if true, print debug info
-
-      character(len=StrKIND), pointer :: &
-           config_basal_mass_bal_float ! option for basal mass balance of floating ice
-
-      real(kind=RKIND), pointer :: &
-           config_thermal_thickness, & ! minimum thickness (m) for temperature calculations
-           config_sea_level,         & ! sea level (m) relative to z = 0
-           config_bmlt_float_flux,   & ! constant heat flux (W/m^2) applied to the base of floating ice; positive upward
-           config_bmlt_float_xlimit    ! x value (m) defining region where bmlt_float_flux is applied;
-                                       !   melt only where abs(x) > xlimit
-
-      integer, dimension(:), pointer :: &
-           cellMask                    ! bit mask describing whether ice is floating, dynamically active, etc.
-
-      type (field1dInteger), pointer :: thermalCellMaskField
-
-      integer, dimension(:), pointer :: &
-           thermalCellMask             ! mask for thermal calculations
-                                       ! = 1 where thickness > config_thermal_thickness, elsewhere = 0
-
-      real (kind=RKIND), dimension(:), pointer :: &
-           xCell                       ! x coordinate for each cell (m)
-
-      real (kind=RKIND), dimension(:), pointer :: &
-           floatingBasalMassBal,     & ! basal mass balance for floating ice
-           thickness,                & ! ice thickness (m)
-           lowerSurface,             & ! lower surface elevation (m)
-           bedTopography               ! bed topography (m; negative below sea level)
-
-      real(kind=RKIND), pointer :: daysSinceStart
-
-      integer :: iCell, err_tmp
-
-      err = 0
-      err_tmp = 0
-
-      call mpas_pool_get_config(liConfigs, 'config_basal_mass_bal_float', config_basal_mass_bal_float)
-
-      if (trim(config_basal_mass_bal_float) == 'none') then
-
-         ! Zero entire field
-
-         ! block loop
-         block => domain % blocklist
-         do while (associated(block))
-            call mpas_pool_get_subpool(block % structs, 'geometry', geometryPool)
-            call mpas_pool_get_array(geometryPool, 'floatingBasalMassBal', floatingBasalMassBal)
-
-            floatingBasalMassBal = 0.0_RKIND
-
-            block => block % next
-         enddo   ! associated(block)
-
-      elseif (trim(config_basal_mass_bal_float) == 'file') then
-
-         return   ! already set; nothing to do
-
-      endif
-
-      ! get rest of config variables
-      call mpas_pool_get_config(liConfigs, 'config_print_thermal_info', config_print_thermal_info)
-      call mpas_pool_get_config(liConfigs, 'config_thermal_thickness', config_thermal_thickness)
-      call mpas_pool_get_config(liConfigs, 'config_sea_level', config_sea_level)
-      call mpas_pool_get_config(liConfigs, 'config_bmlt_float_flux', config_bmlt_float_flux)
-      call mpas_pool_get_config(liConfigs, 'config_bmlt_float_xlimit', config_bmlt_float_xlimit)
-
-      if (config_print_thermal_info) then
-         call mpas_log_write('Solving for basal melting of floating ice, config_basal_mass_bal_float = ' // &
-              trim(config_basal_mass_bal_float) )
-      endif
-
-      ! block loop
-      block => domain % blocklist
-      do while (associated(block))
-
-         ! get pools
-         call mpas_pool_get_subpool(block % structs, 'mesh', meshPool)
-         call mpas_pool_get_subpool(block % structs, 'geometry', geometryPool)
-         call mpas_pool_get_subpool(block % structs, 'velocity', velocityPool)
-         call mpas_pool_get_subpool(block % structs, 'scratch', scratchPool)
-
-         ! get dimensions
-         call mpas_pool_get_dimension(meshPool, 'nCellsSolve', nCellsSolve)
-
-         ! get fields from the mesh pool
-         call mpas_pool_get_array(meshPool, 'xCell', xCell)
-         call mpas_pool_get_array(meshPool, 'daysSinceStart',daysSinceStart)
-
-         ! get fields from the geometry pool
-         call mpas_pool_get_array(geometryPool, 'thickness', thickness)
-         call mpas_pool_get_array(geometryPool, 'lowerSurface', lowerSurface)
-         call mpas_pool_get_array(geometryPool, 'bedTopography', bedTopography)
-         call mpas_pool_get_array(geometryPool, 'cellMask', cellMask)
-         call mpas_pool_get_array(geometryPool, 'floatingBasalMassBal', floatingBasalMassBal)
-
-         ! get fields from the scratch pool
-         call mpas_pool_get_field(scratchPool, 'iceCellMask', thermalCellMaskField)
-         call mpas_allocate_scratch_field(thermalCellMaskField, .true.)
-         thermalCellMask => thermalCellMaskField % array
-
-         ! calculate masks - so we know where the ice is floating
-         call li_calculate_mask(meshPool, velocityPool, geometryPool, err_tmp)
-         err = ior(err, err_tmp)
-
-         ! calculate a mask to identify ice that is thick enough to be thermally active
-         do iCell = 1, nCellsSolve
-            if (thickness(iCell) > config_thermal_thickness) then
-               thermalCellMask(iCell) = 1
-            else
-               thermalCellMask(iCell) = 0
-            endif
-         enddo
-
-         ! Compute basal melting for floating ice.
-
-         call basal_melt_floating_ice(&
-              config_basal_mass_bal_float,  &
-              nCellsSolve,                  &
-              xCell,                        &
-              daysSinceStart,               &
-              thermalCellMask,              &
-              li_mask_is_floating_ice_int(cellMask), &
-              lowerSurface,                 &
-              bedTopography,                &
-              config_sea_level,             &
-              config_bmlt_float_flux,       &
-              config_bmlt_float_xlimit,     &
-              floatingBasalMassBal,         &
-              err_tmp)
-         err = ior(err, err_tmp)
-
-         !WHL - debug
-         ! write(stdoutUnit,*) 'Computed basal melt for floating ice'
-         ! write(stdoutUnit,*) ' '
-         ! write(stdoutUnit,*) 'iCell, thickness, basal mbal:'
-         ! do iCell = 1, nCellsSolve
-         !    if (li_mask_is_floating_ice(cellMask(iCell))) then
-         !       write(stdoutUnit,*) iCell, thickness(iCell), floatingBasalMassBal(iCell)*scyr/rhoi
-         !    endif
-         ! enddo
-         ! write(stdoutUnit,*) 'Done with basal melt for floating ice'
-
-         ! clean up
-         call mpas_deallocate_scratch_field(thermalCellMaskField, .true.)
-
-         block => block % next
-      enddo   ! associated(block)
-
-
-    end subroutine li_basal_melt_floating_ice
 
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 !
-!  !  routine heat_dissipation_sia
+!  !  routine li_heat_dissipation_sia
 !
 !> \brief MPAS land ice heat dissipation for SIA velocity solver
 !> \author William Lipscomb
@@ -1604,7 +1397,7 @@ module li_thermal
 !>  in the ice interior, based on the shallow-ice approximation.
 !-----------------------------------------------------------------------
 
-  subroutine heat_dissipation_sia(domain, err)
+  subroutine li_heat_dissipation_sia(domain, err)
 
      !-----------------------------------------------------------------
      ! input/output variables
@@ -1850,12 +1643,12 @@ module li_thermal
         block => block % next
      enddo  ! associated(block)
 
-   end subroutine heat_dissipation_sia
+   end subroutine li_heat_dissipation_sia
 
 
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 !
-!  !  routine basal_friction
+!  !  routine li_basal_friction
 !
 !> \brief MPAS heat flux due to basal friction for SIA dynamics
 !> \author William Lipscomb
@@ -1865,7 +1658,7 @@ module li_thermal
 !>  base of the ice, based on the shallow-ice approximation.
 !-----------------------------------------------------------------------
 
-   subroutine basal_friction(domain, err)
+   subroutine li_basal_friction(domain, err)
 
      !-----------------------------------------------------------------
      ! input/output variables
@@ -1886,6 +1679,7 @@ module li_thermal
      type (block_type), pointer :: block
 
      type (mpas_pool_type), pointer :: meshPool
+     type (mpas_pool_type), pointer :: geometryPool
      type (mpas_pool_type), pointer :: velocityPool
      type (mpas_pool_type), pointer :: thermalPool
 
@@ -1901,10 +1695,15 @@ module li_thermal
      integer, pointer :: &
           nCellsSolve                ! number of cells
 
+     integer, pointer :: &
+          nCells                     ! number of cells
+
      real(kind=RKIND), dimension(:), pointer :: &
           basalSpeed,              & ! basal ice speed, reconstructed at cell centers (m s^{-1})
           betaSolve,               & ! basal traction parameter (Pa m^{-1} s); use betaSolve to treat floating ice correctly
           basalFrictionFlux          ! heat flux due to basal friction (W^{m-2}), computed in this subroutine
+
+     integer, dimension(:), pointer :: cellMask
 
      integer :: iCell
 
@@ -1933,14 +1732,19 @@ module li_thermal
 
         ! get pools
         call mpas_pool_get_subpool(block % structs, 'mesh', meshPool)
+        call mpas_pool_get_subpool(block % structs, 'geometry', geometryPool)
         call mpas_pool_get_subpool(block % structs, 'velocity', velocityPool)
         call mpas_pool_get_subpool(block % structs, 'thermal', thermalPool)
 
         ! get dimensions
         call mpas_pool_get_dimension(meshPool, 'nCellsSolve', nCellsSolve)
+        call mpas_pool_get_dimension(meshPool, 'nCells', nCells)
 
         ! get fields from the mesh pool
         call mpas_pool_get_array(meshPool, 'indexToCellID', indexToCellID)  ! diagnostic only
+
+        ! get fields from the geometry pool
+        call mpas_pool_get_array(geometryPool, 'cellMask', cellMask)
 
         ! get fields from the velocity pool
         call mpas_pool_get_array(velocityPool, 'basalSpeed', basalSpeed)
@@ -1957,8 +1761,14 @@ module li_thermal
         if (config_print_thermal_info) call mpas_log_write('Compute basal friction flux')
 
         ! Compute basal frictional heating for each cell
-        basalFrictionFlux(:) = betaSolve(:) * basalSpeed(:)**2 * scyr
-          ! < TODO: If beta units are changed to be SI, remove this factor
+        do iCell = 1, nCells
+           if (li_mask_is_grounded_ice(cellMask(iCell))) then
+              basalFrictionFlux(iCell) = betaSolve(iCell) * basalSpeed(iCell)**2 * scyr
+           else
+              basalFrictionFlux(iCell) = 0.0_RKIND ! Ensure no friction flux under floating ice
+           endif
+        enddo
+        ! < TODO: If beta units are changed to be SI, remove scyr factor
 
         ! Optional debugging output
         if (config_print_thermal_info) then
@@ -1973,25 +1783,25 @@ module li_thermal
         block => block % next
      enddo  ! associated(block)
 
-  end subroutine basal_friction
+  end subroutine li_basal_friction
 
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 !
-!  !  routine li_temperature_to_enthalpy
+!  !  routine li_temperature_to_enthalpy_kelvin
 !
 !> \brief MPAS convert temperature to enthalpy
-!> \author William Lipscomb
-!> \date   October 2015
+!> \author William Lipscomb, Tong Zhang
+!> \date   April 2018
 !> \details
 !>  This routine computes the enthalpy in each layer of an ice column,
-!>  given the temperature and water fraction.
+!>  given the temperature (K) and water fraction.
 !-----------------------------------------------------------------------
 
-    subroutine li_temperature_to_enthalpy(&
+    subroutine li_temperature_to_enthalpy_kelvin(&
          layerCenterSigma,  &
          thickness,         &
          temperature,       &
-         waterfrac,         &
+         waterFrac,         &
          enthalpy)
 
       !-----------------------------------------------------------------
@@ -2006,7 +1816,7 @@ module li_thermal
 
       real (kind=RKIND), dimension(:), intent(in) :: &
            temperature,        & !< Input: interior ice temperature
-           waterfrac             !< Input: interior water fraction
+           waterFrac             !< Input: interior water fraction
 
       !-----------------------------------------------------------------
       ! output variables
@@ -2036,9 +1846,103 @@ module li_thermal
       ! Solve for enthalpy
 
       do k = 1, nVertLevels
-         enthalpy(k) = (1.0_RKIND - waterfrac(k)) * rhoi * cp_ice * temperature(k)   &
-                      + waterfrac(k) * rho_water * (cp_ice * pmpTemperature(k) + latent_heat_ice)
+         enthalpy(k) = (1.0_RKIND - waterFrac(k)) * rhoi * cp_ice * temperature(k)   &
+                      + waterFrac(k) * rhoi * (cp_ice * (pmpTemperature(k)+kelvin_to_celsius) + latent_heat_ice)
       end do
+
+    end subroutine li_temperature_to_enthalpy_kelvin
+
+!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+!
+!  !  routine li_temperature_to_enthalpy
+!
+!> \brief MPAS convert temperature to enthalpy
+!> \author William Lipscomb
+!> \date   October 2015
+!> \details
+!>  This routine computes the enthalpy in each layer of an ice column,
+!>  given the temperature and water fraction.
+!-----------------------------------------------------------------------
+
+    subroutine li_temperature_to_enthalpy(&
+         layerCenterSigma,  &
+         thickness,         &
+         temperature,       &
+         waterFrac,         &
+         enthalpy)
+
+      !-----------------------------------------------------------------
+      ! input variables
+      !-----------------------------------------------------------------
+
+      real (kind=RKIND), dimension(:), intent(in) :: &
+           layerCenterSigma      !< Input: sigma coordinate at midpoint of each layer
+
+      real (kind=RKIND), intent(in) ::  &
+           thickness             !< Input: ice thickness
+
+      real (kind=RKIND), dimension(:), intent(in) :: &
+           temperature,        & !< Input: interior ice temperature
+           waterFrac             !< Input: interior water fraction
+
+      !-----------------------------------------------------------------
+      ! output variables
+      !-----------------------------------------------------------------
+
+      real (kind=RKIND), dimension(:), intent(out) :: &
+           enthalpy              !< Output:  interior ice enthalpy
+
+      !-----------------------------------------------------------------
+      ! local variables
+      !-----------------------------------------------------------------
+
+      real (kind=RKIND), dimension(size(layerCenterSigma)) :: &
+           pmpTemperature         ! pressure melting point temperature
+
+      integer :: k, nVertLevels
+
+      nVertLevels = size(layerCenterSigma)
+
+      ! Find pressure melting point temperature in column
+
+      call pressure_melting_point_column(&
+           layerCenterSigma,  &
+           thickness,         &
+           pmpTemperature)
+
+      ! Solve for enthalpy
+
+      do k = 1, nVertLevels
+         enthalpy(k) = (1.0_RKIND - waterFrac(k)) * rhoi * cp_ice * temperature(k)   &
+                      + waterFrac(k) * rhoi * (cp_ice * pmpTemperature(k) + latent_heat_ice)
+      end do
+
+      ! TZ: we should use rhoi instead of rho_water in the second term here.
+
+
+      ! TZ: Here is the reason: from Eqn (6) in the Aschwanden et
+      ! al. (2012) paper "An enthalpy formulation for glaciers and ice sheets",
+
+      ! rho * H = rho_i * H_i + rho_w * H_w,
+
+      ! where rho_i and rho_w are not the ice and water density, but the partial
+      ! density, i.e., rho_i = mass_ice/volume, rho_w = mass_water/volume.
+      ! Because water fraction is very small in general, rho_i approximates to
+      ! rhoi (ice density), rho_w is close to 0.
+      ! Also note that in MALI the enthalpy is equal to the enthalpy density
+      ! (rho*H) in Aschwanden's paper (they don't have density in their
+      ! enthaly definition, but we do). Thus, Let's denote MALI's enthalpy as
+      ! E, and denote W as the water content, then
+
+      ! E = rho * H = rho_i * H_i + rho_w * H_w = (1-W) * H_i + W * H_w
+      ! E = (1-W) * rho * cp * T + W * (rho * cp * T_pmp + rho*L)
+
+      ! As rho approximates to rhoi, we have
+
+      ! E = (1-W) * rhoi * cp * T + W * rhoi * (cp*T_pmp + L)
+
+      ! This is what we get in the code. We can easily do the derivation
+      ! according to Eqns (1-11) in Aschwanden's paper.
 
     end subroutine li_temperature_to_enthalpy
 
@@ -2059,7 +1963,7 @@ module li_thermal
          thickness,          &
          enthalpy,           &
          temperature,        &
-         waterfrac,          &
+         waterFrac,          &
          surfaceEnthalpy,    &
          surfaceTemperature, &
          basalEnthalpy,      &
@@ -2094,7 +1998,7 @@ module li_thermal
            temperature           !< Output: interior ice temperature
 
       real (kind=RKIND), dimension(:), intent(out) :: &
-           waterfrac             !< Output: interior water fraction
+           waterFrac             !< Output: interior water fraction
 
       real (kind=RKIND), intent(out), optional :: &
            surfaceTemperature, & !< Output: surface ice temperature
@@ -2129,18 +2033,18 @@ module li_thermal
       pmpEnthalpy(:) = pmpTemperature(:) * rhoi*cp_ice
       pmpEnthalpyBed = pmpTemperatureBed * rhoi*cp_ice
 
-      ! Solve for temperature and waterfrac in ice interior
+      ! Solve for temperature and waterFrac in ice interior
 
       ! ice interior
 
       do k = 1, nVertLevels
          if (enthalpy(k) >= pmpEnthalpy(k)) then   ! temperate ice
             temperature(k) = pmpTemperature(k)
-            waterfrac(k) = (enthalpy(k) - pmpenthalpy(k)) /        &
-                          ((rho_water-rhoi)*cp_ice*pmpTemperature(k) + rho_water*latent_heat_ice)
+            waterFrac(k) = (enthalpy(k) - pmpenthalpy(k)) /        &
+                          ((rho_water-rhoi)*cp_ice*pmpTemperature(k) + rhoi *latent_heat_ice)
          else   ! cold ice
             temperature(k) = enthalpy(k) / (rhoi*cp_ice)
-            waterfrac(k) = 0.0_RKIND
+            waterFrac(k) = 0.0_RKIND
          endif
       enddo   ! k
 
@@ -2179,6 +2083,142 @@ module li_thermal
 
     end subroutine li_enthalpy_to_temperature
 
+!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+!
+!  !  routine li_enthalpy_to_temperature_kelvin
+!
+!> \brief MPAS convert enthalpy to temperature
+!> \author William Lipscomb, Tong Zhang
+!> \date   April 2018
+!> \details
+!>  This routine computes the temperature (K) and water fraction in each layer
+!>  of an ice column, given the enthalpy.
+!-----------------------------------------------------------------------
+
+    subroutine li_enthalpy_to_temperature_kelvin(&
+         layerCenterSigma,   &
+         thickness,          &
+         enthalpy,           &
+         temperature,        &
+         waterFrac,          &
+         surfaceEnthalpy,    &
+         surfaceTemperature, &
+         basalEnthalpy,      &
+         basalTemperature)
+
+      !-----------------------------------------------------------------
+      ! input variables
+      !-----------------------------------------------------------------
+
+      real (kind=RKIND), dimension(:), intent(in) :: &
+           layerCenterSigma      !< Input: sigma coordinate at midpoint of each layer
+
+      real (kind=RKIND), intent(in) ::  &
+           thickness             !< Input: ice thickness
+
+      !-----------------------------------------------------------------
+      ! input/output variables
+      !-----------------------------------------------------------------
+
+      real (kind=RKIND), dimension(:), intent(inout) :: &
+           enthalpy              !< Input/output: interior ice enthalpy
+
+      real (kind=RKIND), intent(inout) , optional :: &
+           surfaceEnthalpy,    & !< Input/output: surface ice enthalpy
+           basalEnthalpy         !< Input/output: basal ice enthalpy
+
+      !-----------------------------------------------------------------
+      ! output variables
+      !-----------------------------------------------------------------
+
+      real (kind=RKIND), dimension(:), intent(out) :: &
+           temperature           !< Output: interior ice temperature
+
+      real (kind=RKIND), dimension(:), intent(out) :: &
+           waterFrac             !< Output: interior water fraction
+
+      real (kind=RKIND), intent(out), optional :: &
+           surfaceTemperature, & !< Output: surface ice temperature
+           basalTemperature      !< Output: basal ice temperature
+
+      !-----------------------------------------------------------------
+      ! local variables
+      !-----------------------------------------------------------------
+
+      real (kind=RKIND), dimension(size(layerCenterSigma)) :: pmpTemperature
+      real (kind=RKIND), dimension(size(layerCenterSigma)) :: pmpEnthalpy
+
+      real (kind=RKIND) :: pmpTemperatureBed
+      real (kind=RKIND) :: pmpEnthalpyBed
+
+      integer :: k, nVertLevels
+
+      nVertLevels = size(layerCenterSigma)
+
+      ! Find pressure melting point temperature in ice interior
+      call pressure_melting_point_column(&
+           layerCenterSigma,  &
+           thickness,         &
+           pmpTemperature)
+
+      ! find pressure melting point temperature at bed
+      call pressure_melting_point(&
+           thickness, &
+           pmpTemperatureBed)
+
+      ! Find pressure melting point enthalpy
+      pmpEnthalpy(:) = (pmpTemperature(:)+kelvin_to_celsius) * rhoi*cp_ice
+      pmpEnthalpyBed = (pmpTemperatureBed+kelvin_to_celsius) * rhoi*cp_ice
+
+      ! Solve for temperature and waterFrac in ice interior
+
+      ! ice interior
+
+      do k = 1, nVertLevels
+         if (enthalpy(k) >= pmpEnthalpy(k)) then   ! temperate ice
+            temperature(k) = (pmpTemperature(k)+kelvin_to_celsius)
+            waterFrac(k) = (enthalpy(k) - pmpEnthalpy(k)) /        &
+                          ((rho_water-rhoi)*cp_ice*(pmpTemperature(k)+kelvin_to_celsius) + rhoi *latent_heat_ice)
+         else   ! cold ice
+            temperature(k) = enthalpy(k) / (rhoi*cp_ice)
+            waterFrac(k) = 0.0_RKIND
+         endif
+      enddo   ! k
+
+      ! surface temperature (optional)
+
+      if (present(surfaceEnthalpy) .and. present(surfaceTemperature)) then
+
+         if (surfaceEnthalpy >= (kelvin_to_celsius*rhoi*cp_ice)) then   ! temperate ice
+            surfaceTemperature = kelvin_to_celsius
+            ! Reset surfaceEnthalpy to agree with the surface temperature.
+            ! This is consistent with energy conservation because the top surface
+            !  is infinitesimally thin.
+            surfaceEnthalpy = kelvin_to_celsius*rhoi*cp_ice
+         else   ! cold ice
+            surfaceTemperature = surfaceEnthalpy / (rhoi*cp_ice)
+         endif
+
+      endif
+
+      ! basal temperature (optional)
+
+      if (present(basalEnthalpy) .and. present(basalTemperature)) then
+
+         k = nVertLevels + 1
+         if (basalEnthalpy >= pmpEnthalpyBed) then   ! temperate ice
+            basalTemperature = (pmpTemperatureBed+kelvin_to_celsius)
+            ! Reset basalEnthalpy to agree with the surface temperature.
+            ! This is consistent with energy conservation because the lower surface
+            !  is infinitesimally thin.
+            basalEnthalpy = pmpEnthalpyBed
+         else   ! cold ice
+            basalTemperature = basalEnthalpy / (rhoi*cp_ice)
+         endif
+
+      endif
+
+    end subroutine li_enthalpy_to_temperature_kelvin
 !***********************************************************************
 !***********************************************************************
 ! Private subroutines:
@@ -2363,7 +2403,7 @@ module li_thermal
          temperature,           &
          surfaceTemperature,    &
          basalTemperature,      &
-         waterfrac,             &
+         waterFrac,             &
          enthalpy,              &
          heatDissipation,       &
          basalHeatFlux,         &
@@ -2403,7 +2443,7 @@ module li_thermal
 
       real(kind=RKIND), dimension(nVertLevels), intent(in) :: &
            temperature,           & !< Input: ice temperature (deg C)
-           waterfrac,             & !< Input: water fraction (unitless)
+           waterFrac,             & !< Input: water fraction (unitless)
            enthalpy                 !< Input: specific enthalpy (J/m^3)
 
       real(kind=RKIND), intent(in) :: &
@@ -2452,6 +2492,7 @@ module li_thermal
       real(kind=RKIND) :: dEnthalpy             ! enthalpy difference between adjacent layers
       real(kind=RKIND) :: dEnthalpyTemp         ! difference in temperature component of enthalpy between adjacent layers
       real(kind=RKIND) :: avgFactor             ! factor for averaging diffusivity, 0 <= avgFactor <= 1
+      real(kind=RKIND) :: tempDiffusivityFactor ! factor for estimating the diffusivity in temperate ice, normally it should < 1
 
       integer  :: k
 
@@ -2459,8 +2500,19 @@ module li_thermal
            harmonic_avg  = .false.  ! if true, take the harmonic average of diffusivity in adjacent layers
                                     ! if false, take the arithmetic average
 
+      real(kind=RKIND), pointer :: &
+           config_temp_diffusive_factor ! option for basal mass balance of floating ice
+
+      call mpas_pool_get_config(liConfigs, 'config_temp_diffusive_factor', config_temp_diffusive_factor)
+
+      tempDiffusivityFactor = config_temp_diffusive_factor
+      ! TZ: this value is somehow empirical, and the default value (1.0e-5) is picked according to Kleiner's benchemark B.
+      ! In Greve and Blatter (2016) 'Comparison of thermodynamics solvers in the polythermal ice sheet model SICOPOLIS',
+      ! it was 1.0e-3 [] (p14, section 4)
+      ! i.e., kt = 1.0e-3 * kc
+
       diffusivityCold = iceConductivity / (rhoi*cp_ice)
-      diffusivityTemperate = diffusivityCold / 100.0_RKIND
+      diffusivityTemperate = diffusivityCold * tempDiffusivityFactor
 
       ! set enthalpy at surface and bed
       surfaceEnthalpy = surfaceTemperature * rhoi*cp_ice
@@ -2513,7 +2565,7 @@ module li_thermal
 
       enthalpyTemp(0) = surfaceEnthalpy
       do k = 1, nVertLevels
-         enthalpyTemp(k) = (1.0_RKIND - waterfrac(k)) * rhoi*cp_ice*temperature(k)
+         enthalpyTemp(k) = (1.0_RKIND - waterFrac(k)) * rhoi*cp_ice*temperature(k)
       enddo
       enthalpyTemp(nVertLevels+1) = basalEnthalpy
 
@@ -2535,6 +2587,8 @@ module li_thermal
          if (abs(dEnthalpy) > 1.e-20_RKIND * rho_water * latent_heat_ice) then
             avgFactor = max(0.0_RKIND, dEnthalpyTemp/dEnthalpy)
             avgFactor = min(1.0_RKIND, avgFactor)
+            ! TZ: Here temperature is in Celsius. dEnthalpyTemp <= 0 in temperate ice as waterFrac increases
+            ! (or temperature decreases) with depth
          else
             avgFactor = 0.0_RKIND
          endif
@@ -2550,6 +2604,7 @@ module li_thermal
 
       end do
 
+
       ! Compute subdiagonal, diagonal, and superdiagonal matrix elements
       ! Assume backward Euler time stepping
 
@@ -2563,10 +2618,12 @@ module li_thermal
 
       factor = deltat / thickness**2
 
-      subd(2:nVertLevels+1) = -factor * diffusivity(1:nVertLevels)   * dsigmaTerm(1:nVertLevels,1)
+      subd(2:nVertLevels+1) = -factor * diffusivity(1:nVertLevels) * dsigmaTerm(1:nVertLevels,1)
       supd(2:nVertLevels+1) = -factor * diffusivity(2:nVertLevels+1) * dsigmaTerm(1:nVertLevels,2)
       diag(2:nVertLevels+1) = 1.0_RKIND - subd(2:nVertLevels+1) - supd(2:nVertLevels+1)
       rhs(2:nVertLevels+1)  = enthalpy(1:nVertLevels) + heatDissipation(1:nVertLevels) * deltat * rhoi * cp_ice
+      !TZ: Make sure the heat advection is using the upwind scheme, or the solution will not be stable
+
 
       ! Note: heatDissipation has units of phi/rhoi/cp_ice, where phi has units of W m^-3..
       ! For an enthalpy calculation, we want just phi, hence heatDissipation * rhoi * cp_ice
@@ -2587,10 +2644,12 @@ module li_thermal
 
       else    ! grounded ice
 
+
          if (abs(temperature(nVertLevels) - pmpTemperature(nVertLevels)) < 0.001_RKIND) then
 
             ! Positive-thickness basal temperate boundary Layer
             !WHL - Not sure whether this condition is ideal. It implies that basalEnthalpy = enthalpy(nVertLevels).
+            !TZ: This condition means the base is temperate AND there is temperate layer above it. It's physical
 
             subd(nVertLevels+2) = -1.0_RKIND
             diag(nVertLevels+2) =  1.0_RKIND
@@ -2651,7 +2710,7 @@ module li_thermal
          thickness,                   &
          temperature,                 &
          basalTemperature,            &
-         waterfrac,                   &
+         waterFrac,                   &
          enthalpy,                    &
          basalFrictionFlux,           &
          basalHeatFlux,               &
@@ -2696,8 +2755,7 @@ module li_thermal
            thickness,             & !< Input: ice thickness (m)
            basalFrictionFlux,     & !< Input: basal frictional heating flux (W m-2), >= 0
            basalHeatFlux,         & !< Input: geothermal heating flux (W m-2), positive up
-           basalConductiveFlux,   & !< Input: heat conducted from ice interior to bed (W m-2), positive down
-           basalWaterThickness      !< Input: thickness of basal water layer (m)
+           basalConductiveFlux    !< Input: heat conducted from ice interior to bed (W m-2), positive down
 
       integer, dimension(:), intent(in) :: &
            iceMask,               & !< Input: = 1 where ice exists (thickness > config_thermal_thickness), else = 0
@@ -2711,10 +2769,11 @@ module li_thermal
            temperature              !< Input/output: temperature (deg C)
 
       real(kind=RKIND), dimension(:), intent(inout) :: &
-           basalTemperature         !< Input/output: basal temperature (deg C)
+           basalTemperature,        & !< Input/output: basal temperature (deg C)
+           basalWaterThickness      !< Input: thickness of basal water layer (m)
 
       real(kind=RKIND), dimension(:,:), intent(inout) :: &
-           waterfrac                !< Input/output: water fraction
+           waterFrac                !< Input/output: water fraction
 
       !-----------------------------------------------------------------
       ! output variables
@@ -2740,12 +2799,15 @@ module li_thermal
       real(kind=RKIND) :: internalMeltRate      ! internal melt rate, transferred to bed (m/s)
       real(kind=RKIND) :: excessWater           ! thickness of excess meltwater (m)
 
-      real(kind=RKIND), parameter :: &
-           maxWaterfrac = 0.01_RKIND       ! maximum allowed water fraction; excess drains to bed
-
+      real(kind=RKIND) :: maxwaterFrac          ! maximum allowed water fraction; excess drains to bed
+      real(kind=RKIND), pointer :: &
+           config_max_water_fraction ! maximum allowable water fraction before additional melt drains
       real(kind=RKIND), parameter :: &
            eps11 = 1.0e-11_RKIND           ! small number
 
+      call mpas_pool_get_config(liConfigs, 'config_max_water_fraction', config_max_water_fraction)
+
+      maxwaterFrac = config_max_water_fraction
 
       ! Compute melt rate for grounded ice
 
@@ -2771,6 +2833,8 @@ module li_thermal
             !       and overlying layers with a different enthalpy also melt.
 
             netBasalFlux = basalFrictionFlux(iCell) + basalHeatFlux(iCell) + basalConductiveFlux(iCell)  ! W/m^2
+            !call mpas_log_write("netBasalFlux G condFlux $r $r $r", realArgs=(/netBasalFlux, basalHeatFlux(iCell), &
+            !basalConductiveFlux(iCell)/))
 
             if (abs(netBasalFlux) < eps11) then  ! netBasalFlux might be slightly different from zero
                                                  ! because of rounding errors; if so, then zero out
@@ -2778,10 +2842,22 @@ module li_thermal
             endif
 
             if (trim(config_thermal_solver) == 'enthalpy') then
-               groundedBasalMassBal(iCell) = -netBasalFlux / (latent_heat_ice * rhoi - enthalpy(nVertLevels,iCell))
+               !groundedBasalMassBal(iCell) = -netBasalFlux / (latent_heat_ice * rhoi - enthalpy(nVertLevels,iCell))
+               groundedBasalMassBal(iCell) = -netBasalFlux / (latent_heat_ice * rhoi) / (1-waterFrac(nVertLevels,iCell))
+               ! TZ: Don't understand yet why WHL added enthalpy(nVertLevels,iCell) here
+               ! TZ: After a long discussion with Matt Hoffman, we decide to revise it
+               ! to the form as Eqn (66) in Aschwanden and others (2012) "An
+               ! enthalpy formulation for glaciers and ice sheets". An extra
+               ! term (1-w) would be more accurate.
+                basalWaterThickness(iCell) = basalWaterThickness(iCell) - deltat*groundedBasalMassBal(iCell)
+                ! TZ: allow basalWaterThickness freely accumulate here. Change it to something else for difference cases
+                if (basalWaterThickness(iCell) < 0.0_RKIND) then
+                    basalWaterThickness(iCell) = 0.0_RKIND
+                endif
             else   ! temperature solver
                groundedBasalMassBal(iCell) = -netBasalFlux / (latent_heat_ice * rhoi)   ! m/s
             endif
+
 
          endif   ! ice is present and grounded
 
@@ -2793,14 +2869,14 @@ module li_thermal
 
             if (trim(config_thermal_solver) == 'enthalpy') then
 
-               ! Add internal melting associated with waterfrac > maxWaterfrac (1%)
+               ! Add internal melting associated with waterFrac > maxwaterFrac (1%)
                !TODO - Add correction for rhoi/rhow here?  Or melting ice that is already partly melted?
 
                do k = 1, nVertLevels
-                  if (waterfrac(k,iCell) > maxWaterfrac) then
+                  if (waterFrac(k,iCell) > maxwaterFrac) then
 
                      ! compute melt rate associated with excess water
-                     excessWater = (waterfrac(k,iCell) - maxWaterfrac) * thickness(iCell) * (layerInterfaceSigma(k+1) &
+                     excessWater = (waterFrac(k,iCell) - maxwaterFrac) * thickness(iCell) * (layerInterfaceSigma(k+1) &
                         - layerInterfaceSigma(k))  ! m
                      internalMeltRate = excessWater / deltat
 
@@ -2809,10 +2885,10 @@ module li_thermal
                      !       If so, then this melting will later be switched from groundedBasalMassBall to floatingBasalMassBal.
                      groundedBasalMassBal(iCell) = groundedBasalMassBal(iCell) - internalMeltRate      ! m/s
 
-                     ! reset waterfrac to max value
-                     waterfrac(k,iCell) = maxWaterfrac
+                     ! reset waterFrac to max value
+                     waterFrac(k,iCell) = maxwaterFrac
 
-                  endif   ! waterfrac > maxWaterfrac
+                  endif   ! waterFrac > maxwaterFrac
                enddo   ! k
 
             elseif (config_thermal_solver == 'temperature') then
@@ -2890,245 +2966,6 @@ module li_thermal
 
     end subroutine basal_melt_grounded_ice
 
-!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-!
-!  !  routine basal_melt_floating_ice
-!
-!> \brief MPAS melt rate at base of floating ice
-!> \author William Lipscomb
-!> \date   November 2015
-!> \details
-!>  This routine computes the melt rate at the base of floating ice.
-!-----------------------------------------------------------------------
-
-    subroutine basal_melt_floating_ice(&
-         config_basal_mass_bal_float,   &
-         nCellsSolve,                   &
-         xCell,                         &
-         daysSinceStart,                &
-         iceMask,                       &
-         floatingMask,                  &
-         lowerSurface,                  &
-         bedTopography,                 &
-         config_sea_level,              &
-         config_bmlt_float_flux,        &
-         config_bmlt_float_xlimit,      &
-         floatingBasalMassBal,          &
-         err)
-
-      !-----------------------------------------------------------------
-      ! input variables
-      !-----------------------------------------------------------------
-
-      character(len=strKIND), intent(in) :: &
-           config_basal_mass_bal_float  !< Input: option for computing basal mass balance for floating ice
-
-      integer, intent(in) :: &
-           nCellsSolve              !< Input: number of locally owned cells
-
-      real(kind=RKIND), dimension(:), intent(in) :: &
-           xCell                    !< Input: x coordinate for each cell
-
-      real(kind=RKIND), pointer, intent(in) :: daysSinceStart
-
-      real(kind=RKIND), dimension(:), intent(in) :: &
-           lowerSurface,          & !< Input: lower surface elevation (m)
-           bedTopography            !< Input: elevation of bed topography (m)
-
-      real(kind=RKIND), intent(in) :: &
-           config_sea_level         !< Input: sea level relative to z = 0 (m)
-
-      integer, dimension(:), intent(in) :: &
-           iceMask,               & !< Input: = 1 where ice exists (thickness > config_thermal_thickness), else = 0
-           floatingMask             !< Input: = 1 where ice is floating, else = 0
-
-      ! inputs for constant melt rate as in MISMIP+ Ice2 experiments
-      real(kind=RKIND), intent(in) ::  &
-           config_bmlt_float_flux,   & !< Input: constant heat flux (W/m^2) applied to the base of floating ice; positive upward
-                                       !<        MISMIP+ default value = 975.17 W/m^2 (gives melt rate of 100 m/yr)
-           config_bmlt_float_xlimit    !< Input: x value (m) defining region where bmlt_float_flux is applied;
-                                       !<        melt only where abs(x) > xlimit
-                                       !<        MISMIP+ default value = 480 km
-
-      !-----------------------------------------------------------------
-      ! output variables
-      !-----------------------------------------------------------------
-
-      real(kind=RKIND), dimension(:), intent(out):: &
-           floatingBasalMassBal     !< Output: basal mass balance for floating ice
-
-      integer, intent(out) :: err
-
-      !-----------------------------------------------------------------
-      ! local variables
-      !-----------------------------------------------------------------
-
-      real(kind=RKIND) :: &
-           bmlt_float_rate                          ! constant basal melt rate (m/s)
-                                                    ! = config_bmlt_float_flux / (rhoi*latent_heat_ice)
-      integer :: iCell
-
-      real(kind=RKIND) :: hCavity               ! depth of ice cavity beneath floating ice (m)
-      real(kind=RKIND) :: zDraft                ! draft of floating ice (m below sea level)
-
-      ! basal melting parameters for MISMIP+ experiment
-      ! Note: These could be made user-configurable, but are hardwired for now because there are no plans
-      !       to run MISMIP+ with different values
-      real(kind=RKIND), parameter :: &
-           bmlt_float_omega = 0.20_RKIND / scyr,  & ! time scale for basal melting (s^-1)
-                                                    ! MISMIP+ default value = 0.2 yr^-1
-           bmlt_float_h0 = 75._RKIND,             & ! scale for sub-shelf cavity thickness (m)
-                                                    ! MISMIP+ default value = 75 m
-           bmlt_float_z0 = -100._RKIND              ! scale for ice draft (m)
-                                                    ! MISMIP+ default value = -100 m
-
-      ! basal melt parameters for Seroussi param.
-      real (kind=RKIND) :: slopeSer  ! slope of relation between depth and melt rate
-      real (kind=RKIND) :: interceptSer  ! depth at which melting goes to 0
-      real (kind=RKIND) :: maxMeltSer  ! maximum allowable melt rate
-      real (kind=RKIND) :: sillDepth  ! depth below which melt rate no longer increases
-      real (kind=RKIND), pointer :: config_basal_mass_bal_seroussi_amplitude
-      real (kind=RKIND), pointer :: config_basal_mass_bal_seroussi_period
-      real (kind=RKIND), pointer :: config_basal_mass_bal_seroussi_phase
-
-
-      ! Compute melt rate for floating ice
-      err = 0
-
-      ! initialize to zero melt
-      floatingBasalMassBal(:) = 0.0_RKIND
-      if (trim(config_basal_mass_bal_float) == 'none') then
-         ! Do nothing, handled in calling routine
-
-      elseif (trim(config_basal_mass_bal_float) == 'file') then
-         ! Do nothing, handled in calling routine
-
-      elseif (trim(config_basal_mass_bal_float) == 'constant') then
-
-         ! set melt rate to a constant value for floating ice
-         ! allow basal melt in ice-free ocean cells, in case ice is advected to those cells by the transport scheme
-
-         bmlt_float_rate = config_bmlt_float_flux / (rhoi*latent_heat_ice)  ! convert W/m^2 to m/s
-
-         floatingBasalMassBal(:) = 0.0_RKIND
-
-         do iCell = 1, nCellsSolve
-            if ( floatingMask(iCell) == 1 .or.  &
-                 (bedTopography(iCell) < config_sea_level .and. iceMask(iCell) == 0) ) then
-               ! ice is present and floating, or ice-free ocean
-
-               ! Provided xCell > bmlt_float_xlimit, prescribe a uniform basal melt rate.
-               ! The default is 0.0, but for MISMIP+ the prescribed value of xlimit is 480 km.
-               if (abs(xCell(iCell)) >= config_bmlt_float_xlimit) then  ! basal melting is allowed
-                  floatingBasalMassBal(iCell) = -bmlt_float_rate
-               endif
-
-            endif   ! ice is present and floating
-
-         enddo   ! iCell
-
-         ! change units from m/s to kg/m2/s
-         floatingBasalMassBal(:) = floatingBasalMassBal(:) * rhoi
-
-      elseif (trim(config_basal_mass_bal_float) == 'mismip') then
-
-         ! compute melt rate (m/s) based on bed depth and cavity thickness
-         ! The MISMIP+ formula is as follows:
-         !
-         ! bmlt_float = omega * tanh(H_c/H_0) * max(z_0 - z_d, 0)
-         !
-         ! where H_c = lsrf - topg is the cavity thickness
-         !       z_d = lsrf - eus is the ice draft
-         !       omega = a time scale = 0.2 yr^{-1} by default
-         !       H_0 = 75 m by default
-         !       z_0 = -100 m by default
-
-         ! allow basal melt in ice-free ocean cells, in case ice is advected to those cells by the transport scheme
-
-         floatingBasalMassBal(:) = 0.0_RKIND
-
-         do iCell = 1, nCellsSolve
-
-            if ( floatingMask(iCell) == 1 .or.  &
-                 (bedTopography(iCell) < config_sea_level .and. iceMask(iCell) == 0) ) then
-                 ! ice is present and floating, or ice-free ocean
-
-               hCavity = lowerSurface(iCell) - bedTopography(iCell)
-               zDraft = lowerSurface(iCell) - config_sea_level
-               floatingBasalMassBal(iCell) = -bmlt_float_omega * tanh(hCavity/bmlt_float_h0) * max(bmlt_float_z0 - &
-                  zDraft, 0.0_RKIND)
-
-            endif   ! ice is present and floating
-         enddo   ! iCell
-
-         ! change units from m/s to kg/m2/s
-         floatingBasalMassBal(:) = floatingBasalMassBal(:) * rhoi
-
-      elseif (trim(config_basal_mass_bal_float) == 'seroussi') then
-
-         ! Melt rate parameterization from:
-         ! Seroussi, H., Y. Nakayama, E. Larour, D. Menemenlis, M. Morlighem, E. Rignot, and A. Khazendar (2017),
-         ! Continued retreat of Thwaites Glacier, West Antarctica, controlled by bed topography and ocean circulation,
-         ! Geophys. Res. Lett., 1-9, doi:10.1002/2017GL072910.
-         ! for Thwaites Glacier.
-         ! Specifically, this is a linear fit of melt with shelf draft from the Supplemental Information, Figure S1.
-         ! The linear relation is modified by a:
-         !   * depth above which there is no melt (Antarctic Surface Water saturation)
-         !   * a maximum melt rate (Circumpolar Deep Water saturation)
-         !   * a depth below which melt stops increasing (minimum sill height)
-
-         call mpas_pool_get_config(liConfigs, 'config_basal_mass_bal_seroussi_amplitude', &
-            config_basal_mass_bal_seroussi_amplitude) ! meters
-         call mpas_pool_get_config(liConfigs, 'config_basal_mass_bal_seroussi_period', &
-            config_basal_mass_bal_seroussi_period) ! years
-         call mpas_pool_get_config(liConfigs, 'config_basal_mass_bal_seroussi_phase', &
-            config_basal_mass_bal_seroussi_phase) ! cycles
-
-         slopeSer = 0.088_RKIND ! slope of relation between depth and melt rate (melt (m/yr) per depth (m))
-         interceptSer = -100.0_RKIND  ! depth (m) at which melting goes to 0 (negative meaning below sea level)
-         maxMeltSer = 50.0_RKIND ! maximum allowable melt rate (m/yr) (positive meaning melting)
-         sillDepth = -650.0_RKIND ! depth below which melt stops increasing (m) (negative meaning below sea level)
-
-         if (config_basal_mass_bal_seroussi_period <= 0.0_RKIND) then
-            call mpas_log_write("Value for config_basal_mass_bal_seroussi_period has to be a positive real value.", MPAS_LOG_ERR)
-            err = ior(err, 1)
-         endif
-
-         ! Modify intercept height for variability parameters
-         interceptSer = interceptSer + config_basal_mass_bal_seroussi_amplitude * &
-                 sin( (2.0_RKIND * pii / config_basal_mass_bal_seroussi_period) * (daysSinceStart/365.0_RKIND) &
-                     + 2.0_RKIND * pii * config_basal_mass_bal_seroussi_phase)
-
-         ! Initialize before computing
-         floatingBasalMassBal(:) = 0.0_RKIND
-
-         do iCell = 1, nCellsSolve
-
-            ! Shut off melt at an arbitrary shallow depth to discourage ice from disappearing.
-            if ( (floatingMask(iCell) == 1) .and. (lowerSurface(iCell) < -10.0_RKIND) ) then
-               ! ice is present and floating
-
-               zDraft = lowerSurface(iCell) - config_sea_level
-               ! Coefficients for m/yr melt rate (in units of Seroussi figure but without negative meaning melting)
-               floatingBasalMassBal(iCell) = max(-1.0_RKIND * maxMeltSer, min(0.0_RKIND, slopeSer * &
-                  (max(zDraft, sillDepth) - interceptSer)))
-
-            endif   ! ice is present
-         enddo   ! iCell
-
-         ! change units from m/yr to kg/m2/s
-         floatingBasalMassBal(:) = floatingBasalMassBal(:) * rhoi / scyr
-
-      else
-
-         call mpas_log_write('Unknown option selected for config_basal_mass_bal_float:' // &
-            trim(config_basal_mass_bal_float), MPAS_LOG_ERR)
-         err = ior(err, 1)
-
-      endif   ! config_basal_mass_bal_float
-
-
-    end subroutine basal_melt_floating_ice
 
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 !
@@ -3328,6 +3165,4 @@ module li_thermal
   end module li_thermal
 
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-
-
 

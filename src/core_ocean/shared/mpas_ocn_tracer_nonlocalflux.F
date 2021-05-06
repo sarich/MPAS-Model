@@ -25,6 +25,7 @@ module ocn_tracer_nonlocalflux
    use mpas_derived_types
    use mpas_pool_routines
    use ocn_constants
+   use ocn_config
 
    implicit none
    private
@@ -111,7 +112,7 @@ contains
       integer :: iCell, k, iTracer, nTracers, nCells
       integer, pointer :: nVertLevels
       integer, dimension(:), pointer :: nCellsArray
-      integer, dimension(:), pointer :: maxLevelCell
+      integer, dimension(:), pointer :: minLevelCell, maxLevelCell
       real (kind=RKIND) :: fluxTopOfCell, fluxBottomOfCell
 
       err = 0
@@ -124,13 +125,15 @@ contains
       call mpas_pool_get_dimension(meshPool, 'nVertLevels', nVertLevels)
       nTracers = size(tend, dim=1)
 
+      call mpas_pool_get_array(meshPool, 'minLevelCell', minLevelCell)
       call mpas_pool_get_array(meshPool, 'maxLevelCell', maxLevelCell)
 
       nCells = nCellsArray( 1 )
 
+      !$omp parallel
       !$omp do schedule(runtime) private(k, iTracer, fluxTopOfCell, fluxBottomOfCell)
       do iCell = 1, nCells
-        do k = 2, maxLevelCell(iCell)-1
+        do k = minLevelCell(iCell)+1, maxLevelCell(iCell)-1
 
           ! NOTE: at the moment, all tracers are based on the flux-profile used for temperature, i.e. vertNonLocalFlux(1,:,:)
           do iTracer = 1, nTracers
@@ -149,7 +152,7 @@ contains
         end do
 
         ! enforce boundary conditions at top of column
-        k = 1
+        k = minLevelCell(iCell)
         do iTracer = 1, nTracers
           fluxTopOfCell = 0.0_RKIND
           fluxBottomOfCell = surfaceTracerFlux(iTracer, iCell) * vertNonLocalFlux(1, k+1, iCell)
@@ -158,6 +161,7 @@ contains
 
       end do
       !$omp end do
+      !$omp end parallel
 
       call mpas_timer_stop('non-local flux')
 
@@ -183,12 +187,8 @@ contains
    !--------------------------------------------------------------------
 
       integer, intent(out) :: err !< Output: error flag
-      logical, pointer :: config_disable_tr_nonlocalflux, config_use_cvmix_kpp
 
       err = 0
-
-      call mpas_pool_get_config(ocnConfigs, 'config_disable_tr_nonlocalflux', config_disable_tr_nonlocalflux)
-      call mpas_pool_get_config(ocnConfigs, 'config_use_cvmix_kpp', config_use_cvmix_kpp)
 
       nonLocalFluxOn = .true.
 

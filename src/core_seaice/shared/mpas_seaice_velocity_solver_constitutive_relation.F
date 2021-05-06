@@ -24,19 +24,29 @@ module seaice_velocity_solver_constitutive_relation
   public :: &
        seaice_init_evp, &
        seaice_evp_constitutive_relation, &
-       seaice_evp_constitutive_relation_revised
+       seaice_evp_constitutive_relation_revised, &
+       seaice_linear_constitutive_relation
+
+  ! constitutive relation options
+  integer, public :: &
+       constitutiveRelationType
+
+  integer, public :: &
+       EVP_CONSTITUTIVE_RELATION = 1, &
+       REVISED_EVP_CONSTITUTIVE_RELATION = 2, &
+       LINEAR_CONSTITUTIVE_RELATION = 3, &
+       NONE_CONSTITUTIVE_RELATION = 4
 
   ! general EVP parameters
   real(kind=RKIND), parameter, private :: &
        eccentricity = 2.0_RKIND, &
-       dampingTimescaleParameter = 0.36_RKIND, &
-       puny = 1.0e-11_RKIND
+       dampingTimescaleParameter = 0.36_RKIND
 
   real(kind=RKIND), parameter, public :: &
-       eccentricitySquared = eccentricity**2
+       eccentricitySquared = eccentricity**2, &
+       puny = 1.0e-11_RKIND
 
   real(kind=RKIND), private :: &
-       dampingTimescale, &
        evpDampingCriterion
 
   ! Bouillon et al. 2013 parameters
@@ -45,6 +55,7 @@ module seaice_velocity_solver_constitutive_relation
        dampingRatio = 5.5e-3_RKIND  ! xi = Sv/Sc < 1
 
   real(kind=RKIND), public :: &
+       dampingTimescale, &
        numericalInertiaCoefficient ! brlx
 
 contains
@@ -67,6 +78,9 @@ contains
 
     type(block_type), pointer :: block
 
+    character(len=strKIND), pointer :: &
+         config_constitutive_relation_type
+
     type(MPAS_pool_type), pointer :: &
          velocitySolver, &
          mesh
@@ -85,6 +99,20 @@ contains
          gamma, &
          dvEdgeMin, &
          dvEdgeMinGlobal
+
+    ! constitutive relation type
+    call MPAS_pool_get_config(domain % configs, "config_constitutive_relation_type", config_constitutive_relation_type)
+    if (trim(config_constitutive_relation_type) == 'evp') then
+       constitutiveRelationType = EVP_CONSTITUTIVE_RELATION
+    else if (trim(config_constitutive_relation_type) == 'evp_revised') then
+       constitutiveRelationType = REVISED_EVP_CONSTITUTIVE_RELATION
+    else if (trim(config_constitutive_relation_type) == 'linear') then
+       constitutiveRelationType = LINEAR_CONSTITUTIVE_RELATION
+    else if (trim(config_constitutive_relation_type) == 'none') then
+       constitutiveRelationType = NONE_CONSTITUTIVE_RELATION
+    else
+       call MPAS_log_write("config_constitutive_relation_type unknown: "//trim(config_constitutive_relation_type), MPAS_LOG_CRIT)
+    endif
 
     ! general EVP
     block => domain % blocklist
@@ -158,6 +186,10 @@ contains
        replacementPressure, &
        areaCell, &
        dtElastic)
+#ifdef CPRINTEL
+!$omp declare simd(seaice_evp_constitutive_relation) uniform(dtElastic), notinbranch &
+!$omp& linear(ref(stress11,stress22,stress12,strain11,strain22,strain12,replacementPressure,icePressure,areaCell))
+#endif
 
     real(kind=RKIND), intent(inout) :: &
          stress11, & !< Input/Output:
@@ -237,6 +269,10 @@ contains
        icePressure, &
        replacementPressure, &
        areaCell)
+#ifdef CPRINTEL
+!$omp declare simd(seaice_evp_constitutive_relation_revised) uniform(icePressure,areaCell), notinbranch &
+!$omp& linear(ref(stress11,stress22,stress12,strain11,strain22,strain12,replacementPressure))
+#endif
 
     real(kind=RKIND), intent(inout) :: &
          stress11, & !< Input/Output:
@@ -312,6 +348,10 @@ contains
        strain11, &
        strain22, &
        strain12)
+#ifdef CPRINTEL
+!$omp declare simd(seaice_linear_constitutive_relation) notinbranch &
+!$omp& linear(ref(stress11,stress22,stress12,strain11,strain22,strain12))
+#endif
 
     real(kind=RKIND), intent(out) :: &
          stress11, & !< Output:

@@ -30,6 +30,8 @@
     config_do_restart_hbrine = false
     config_do_restart_zsalinity = false
     config_do_restart_bgc = false
+    config_do_restart_snow_density = false
+    config_do_restart_snow_grain_radius = false
 /
 &dimensions
     config_nCategories = 5
@@ -37,6 +39,7 @@
     config_nSnowLayers = 1
 /
 &initialize
+    config_earth_radius = 6371229.0
     config_initial_condition_type = 'cice_default'
     config_initial_ice_area = 1.0
     config_initial_ice_volume = 1.0
@@ -49,10 +52,13 @@
     config_calculate_coriolis = true
 /
 &use_sections
+    config_use_dynamics = true
     config_use_velocity_solver = true
     config_use_advection = true
     config_use_forcing = true
     config_use_column_package = true
+    config_use_prescribed_ice = false
+    config_use_prescribed_ice_forcing = false
 /
 &forcing
     config_atmospheric_forcing_type = 'CORE'
@@ -64,10 +70,7 @@
     config_update_ocean_fluxes = false
     config_include_pond_freshwater_feedback = false
 /
-&unit_test
-    config_perform_unit_test = false
-    config_unit_test_type = ''
-    config_unit_test_subtype = ''
+&testing
     config_use_test_ice_shelf = false
     config_testing_system_test = false
 /
@@ -76,15 +79,22 @@
     config_rotate_cartesian_grid = true
     config_include_metric_terms = true
     config_elastic_subcycle_number = 120
+    config_strain_scheme = 'variational'
+    config_constitutive_relation_type = 'evp'
     config_stress_divergence_scheme = 'variational'
     config_variational_basis = 'wachspress'
+    config_variational_denominator_type = 'original'
     config_wachspress_integration_type = 'dunavant'
     config_wachspress_integration_order = 8
-    config_revised_evp = false
+    config_average_variational_strain = false
+    config_calc_velocity_masks = true
     config_use_air_stress = true
     config_use_ocean_stress = true
     config_use_surface_tilt = true
     config_geostrophic_surface_tilt = true
+    config_ocean_stress_type = 'quadratic'
+    config_use_special_boundaries_velocity = false
+    config_use_special_boundaries_velocity_masks = false
 /
 &advection
     config_advection_type = 'incremental_remap'
@@ -99,6 +109,7 @@
     config_use_column_biogeochemistry = true
     config_use_column_itd_thermodynamics = true
     config_use_column_ridging = true
+    config_use_column_snow_tracers = false
 /
 &column_tracers
     config_use_ice_age = true
@@ -108,6 +119,9 @@
     config_use_level_meltponds = true
     config_use_topo_meltponds = false
     config_use_aerosols = false
+    config_use_effective_snow_density = false
+    config_use_snow_grain_radius = false
+    config_use_special_boundaries_zero_tracers = false
 /
 &biogeochemistry
     config_use_brine = true
@@ -117,7 +131,7 @@
     config_use_vertical_tracers = true
     config_use_skeletal_biochemistry = false
     config_use_nitrate = true
-    config_use_carbon = false
+    config_use_carbon = true
     config_use_chlorophyll = false
     config_use_ammonium = true
     config_use_silicate = true
@@ -199,14 +213,14 @@
     config_iron_saturation_small_plankton = 0.2
     config_iron_saturation_phaeocystis = 0.1
     config_fraction_spilled_to_DON = 0.6
-    config_degredation_of_DON = 0.03
-    config_fraction_DON_ammonium = 0.25
-    config_fraction_loss_to_saccharids = 0.4
-    config_fraction_loss_to_lipids = 0.4
+    config_degredation_of_DON = 0.007
+    config_fraction_DON_ammonium = 1.0
+    config_fraction_loss_to_saccharids = 0.5
+    config_fraction_loss_to_lipids = 0.5
     config_fraction_exudation_to_saccharids = 1.0
     config_fraction_exudation_to_lipids = 1.0
-    config_remineralization_saccharids = 0.03
-    config_remineralization_lipids = 0.03
+    config_remineralization_saccharids = 0.007
+    config_remineralization_lipids = 0.007
     config_maximum_brine_temperature = 0.0
     config_salinity_dependence_of_growth = 1.0
     config_minimum_optical_depth = 0.1
@@ -214,7 +228,7 @@
     config_excreted_fraction = 0.5
     config_fraction_mortality_to_ammonium = 0.5
     config_fraction_iron_remineralized = 0.3
-    config_nitrification_rate = 0.0
+    config_nitrification_rate = 0.005
     config_desorption_loss_particulate_iron = 3065.0
     config_maximum_loss_fraction = 0.9
     config_maximum_ratio_iron_to_saccharids = 0.2
@@ -226,22 +240,23 @@
     config_mobility_type_small_plankton = 0.0
     config_mobility_type_phaeocystis = 0.0
     config_mobility_type_nitrate = -1.0
-    config_mobility_type_ammonium = 1.0
+    config_mobility_type_ammonium = 0.0
     config_mobility_type_silicate = -1.0
-    config_mobility_type_DMSPp = 0.5
-    config_mobility_type_DMSPd = 0.5
-    config_mobility_type_humics = 1.0
+    config_mobility_type_DMSPp = 0.0
+    config_mobility_type_DMSPd = 0.0
+    config_mobility_type_humics = 0.0
     config_mobility_type_saccharids = 0.5
     config_mobility_type_lipids = 0.5
+    config_mobility_type_inorganic_carbon = -1.0
     config_mobility_type_proteins = 0.5
-    config_mobility_type_dissolved_iron = 0.5
-    config_mobility_type_particulate_iron = 0.5
-    config_mobility_type_black_carbon1 = 1.0
-    config_mobility_type_black_carbon2 = 1.0
-    config_mobility_type_dust1 = 1.0
-    config_mobility_type_dust2 = 1.0
-    config_mobility_type_dust3 = 1.0
-    config_mobility_type_dust4 = 1.0
+    config_mobility_type_dissolved_iron = 0.0
+    config_mobility_type_particulate_iron = 0.0
+    config_mobility_type_black_carbon1 = 0.0
+    config_mobility_type_black_carbon2 = 0.0
+    config_mobility_type_dust1 = 0.0
+    config_mobility_type_dust2 = 0.0
+    config_mobility_type_dust3 = 0.0
+    config_mobility_type_dust4 = 0.0
     config_ratio_C_to_N_diatoms = 7.0
     config_ratio_C_to_N_small_plankton = 7.0
     config_ratio_C_to_N_phaeocystis = 7.0
@@ -251,11 +266,12 @@
     config_scales_absorption_diatoms = 2.0
     config_scales_absorption_small_plankton = 4.0
     config_scales_absorption_phaeocystis = 5.0
-    config_ratio_C_to_N_proteins = 7.0
+    config_ratio_C_to_N_proteins = 5.0
 /
 &shortwave
     config_shortwave_type = 'dEdd'
     config_albedo_type = 'ccsm3'
+    config_use_snicar_ad = false
     config_visible_ice_albedo = 0.78
     config_infrared_ice_albedo = 0.36
     config_visible_snow_albedo = 0.98
@@ -267,6 +283,16 @@
     config_temp_change_snow_grain_radius_change = 1.5
     config_max_melting_snow_grain_radius = 1500.0
     config_algae_absorption_coefficient = 0.6
+/
+&snow
+    config_snow_redistribution_scheme = 'none'
+    config_fallen_snow_radius = 54.526
+    config_use_snow_liquid_ponds = false
+    config_new_snow_density = 100.0
+    config_max_snow_density = 450.0
+    config_minimum_wind_compaction = 10.0
+    config_wind_compaction_factor = 27.3
+    config_max_dry_snow_radius = 1500.0
 /
 &meltponds
     config_snow_to_ice_transition_depth = 0.0
@@ -348,7 +374,7 @@
     config_AM_ridgingDiagnostics_write_on_startup = false
 /
 &AM_conservationCheck
-    config_AM_conservationCheck_enable = false
+    config_AM_conservationCheck_enable = true
     config_AM_conservationCheck_compute_interval = 'dt'
     config_AM_conservationCheck_output_stream = 'conservationCheckOutput'
     config_AM_conservationCheck_compute_on_startup = false

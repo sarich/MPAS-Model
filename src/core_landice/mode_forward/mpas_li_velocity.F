@@ -227,6 +227,7 @@ contains
       use mpas_vector_reconstruction
       use li_mask
       use li_advection
+      use li_thermal
 
       !-----------------------------------------------------------------
       ! input variables
@@ -257,6 +258,7 @@ contains
       type (mpas_pool_type), pointer :: thermalPool
       type (mpas_pool_type), pointer :: scratchPool
       type (mpas_pool_type), pointer :: velocityPool
+      type (mpas_pool_type), pointer :: hydroPool
       ! pointers to get from pools
       character (len=StrKIND), pointer :: config_velocity_solver
       logical, pointer :: config_do_velocity_reconstruction_for_external_dycore
@@ -266,6 +268,7 @@ contains
       integer, pointer :: nEdgesSolve
       integer, pointer :: nEdges
       integer, pointer :: nVertInterfaces
+      integer, pointer :: nCells
       integer, dimension(:), pointer :: edgeMask, cellMask, vertexMask, vertexMaskOld
       integer, dimension(:,:), pointer :: dirichletVelocityMaskOld, dirichletVelocityMaskNew
       real (kind=RKIND), dimension(:,:), pointer :: normalVelocity, normalVelocityInitial
@@ -274,9 +277,10 @@ contains
       real (kind=RKIND), dimension(:,:), pointer :: edgeNormalVectors
       real (kind=RKIND), dimension(:), pointer :: thickness
       real (kind=RKIND), dimension(:), pointer :: surfaceSpeed, basalSpeed
+      real (kind=RKIND), dimension(:), pointer :: xvelmean, yvelmean
       real (kind=RKIND), dimension(:), pointer :: normalSlopeEdge
       real (kind=RKIND), dimension(:), pointer :: dcEdge
-      integer, dimension(:), pointer :: floatingEdges
+      real (kind=RKIND), dimension(:), pointer :: layerInterfaceFractions
       integer, dimension(:,:), pointer :: cellsOnEdge
       integer, dimension(:,:), pointer :: cellsOnVertex
       integer, dimension(:,:), pointer :: verticesOnEdge
@@ -308,7 +312,7 @@ contains
          config_do_velocity_reconstruction_for_external_dycore)
       call mpas_pool_get_config(liConfigs, 'config_print_velocity_cleanup_details', config_print_velocity_cleanup_details)
       call mpas_pool_get_config(liConfigs, 'config_dynamic_thickness', config_dynamic_thickness)
-          call mpas_pool_get_config(liConfigs, 'config_adaptive_timestep_include_DCFL', config_adaptive_timestep_include_DCFL)
+      call mpas_pool_get_config(liConfigs, 'config_adaptive_timestep_include_DCFL', config_adaptive_timestep_include_DCFL)
 
       uphillMarginEdgesFixed = 0
 
@@ -393,11 +397,8 @@ contains
             maxThicknessOnProc = max(maxThicknessOnProc, maxval(thickness))
 
             ! The interface expects an array where 1's are floating edges and 0's are non-floating edges.
-            call mpas_pool_get_array(velocityPool, 'floatingEdges', floatingEdges)
             call mpas_pool_get_array(geometryPool, 'edgeMask', edgeMask)
-            floatingEdges = li_mask_is_floating_ice_int(edgeMask)
             call mpas_pool_get_array(geometryPool, 'vertexMask', vertexMask, timeLevel=1)
-            call li_calculate_extrapolate_floating_edgemask(meshPool, vertexMask, floatingEdges)
 
             ! Determine if the vertex mask changed during this time step for this block (needed for external dycores)
             ! TODO:  There may be some aspects of the mask that are ok change for external dycores,
@@ -435,11 +436,6 @@ contains
 
          ! check for thickness on any proc
          call mpas_dmpar_max_real(domain % dminfo, maxThicknessOnProc, maxThicknessAllProcs)
-         ! Update halos on mask - the outermost cells/edges/vertices may be wrong for
-         ! mask components that need neighbor information
-         call mpas_timer_start("halo updates")
-         call mpas_dmpar_field_halo_exch(domain, 'floatingEdges')
-         call mpas_timer_stop("halo updates")
 
          ! Determine if the vertex mask has changed on any processor and store the value for later use
          ! (need to exit the block loop to do so)
@@ -465,6 +461,7 @@ contains
          call mpas_pool_get_subpool(block % structs, 'thermal', thermalPool)
          call mpas_pool_get_subpool(block % structs, 'scratch', scratchPool)
          call mpas_pool_get_subpool(block % structs, 'velocity', velocityPool)
+         call mpas_pool_get_subpool(block % structs, 'hydro', hydroPool)
 
          call mpas_pool_get_dimension(meshPool, 'nEdgesSolve', nEdgesSolve)
          call mpas_pool_get_array(velocityPool, 'normalVelocity', normalVelocity)
@@ -500,7 +497,7 @@ contains
                 uReconstructZ = 0.0_RKIND
                 call mpas_log_write("Notice: Skipping velocity solve because there is no dynamic ice in domain.", MPAS_LOG_WARN)
              else
-                call li_velocity_external_solve(meshPool, geometryPool, thermalPool, scratchPool, velocityPool, err_tmp)
+                call li_velocity_external_solve(meshPool, geometryPool, thermalPool, hydroPool, scratchPool, velocityPool, err_tmp)
              endif
 
          case('simple')
@@ -586,6 +583,8 @@ contains
          call mpas_pool_get_subpool(block % structs, 'mesh', meshPool)
          call mpas_pool_get_subpool(block % structs, 'velocity', velocityPool)
          call mpas_pool_get_subpool(block % structs, 'geometry', geometryPool)
+         call mpas_pool_get_subpool(block % structs, 'thermal', thermalPool)
+         call mpas_pool_get_subpool(block % structs, 'scratch', scratchPool)
 
          ! ---
          ! --- Calculate reconstructed velocities
@@ -593,6 +592,8 @@ contains
          ! do this after velocity halo update in case velocities on the 1-halo edge are wrong (depends on velocity solver)
          ! Still do this even if we didn't calculate velocity because on a restart these will be defined at the initial time.
          call mpas_pool_get_dimension(meshPool, 'nVertInterfaces', nVertInterfaces)
+         call mpas_pool_get_dimension(meshPool, 'nCells', nCells)
+         call mpas_pool_get_array(meshPool, 'layerInterfaceFractions', layerInterfaceFractions)
          call mpas_pool_get_array(velocityPool, 'normalVelocity', normalVelocity)
          call mpas_pool_get_array(velocityPool, 'uReconstructX', uReconstructX)
          call mpas_pool_get_array(velocityPool, 'uReconstructY', uReconstructY)
@@ -601,6 +602,8 @@ contains
          call mpas_pool_get_array(velocityPool, 'uReconstructMeridional', uReconstructMeridional)
          call mpas_pool_get_array(velocityPool, 'surfaceSpeed', surfaceSpeed)
          call mpas_pool_get_array(velocityPool, 'basalSpeed', basalSpeed)
+         call mpas_pool_get_array(velocityPool, 'xvelmean', xvelmean)
+         call mpas_pool_get_array(velocityPool, 'yvelmean', yvelmean)
 
          ! Velocities need to be reconstructed at cell centers for the native SIA dycore and for prescribed simple velocities.
          ! External dycores return their native velocities at cell center locations,
@@ -635,26 +638,47 @@ contains
          end if
 
          ! ---
+         ! --- Remove floating ice where velocity is unrealistically fast
+         ! --- (Removed ice is added to calving flux)
+         ! --- (TODO: make this a namelist option?)
+         ! ---
+         call remove_fast_ice(meshPool, uReconstructX, uReconstructY, normalVelocity, geometryPool)
+
+         ! ---
          ! --- Calculate diagnostic speed arrays
          ! ---
          surfaceSpeed = sqrt(uReconstructX(1,:)**2 + uReconstructY(1,:)**2)
          basalSpeed   = sqrt(uReconstructX(nVertInterfaces,:)**2 + uReconstructY(nVertInterfaces,:)**2)
 
+         ! calculate vertical mean velocity
+         do iCell = 1, nCells
+            xvelmean(iCell) = sum(uReconstructX(:,iCell) * layerInterfaceFractions(:))
+            yvelmean(iCell) = sum(uReconstructY(:,iCell) * layerInterfaceFractions(:))
+         enddo
          ! ---
          ! --- Calculate strain rates on cell centers
          ! ---
-         call calculate_strain_rates(meshPool, velocityPool, err_tmp)
+         call calculate_strain_rates_and_stresses(meshPool, geometryPool, thermalPool, scratchPool, velocityPool, err)
          err = ior(err, err_tmp)
-
-         ! ---
-         ! --- Remove floating ice where velocity is unrealistically fast
-         ! --- (Removed ice is added to calving flux)
-         ! --- (TODO: make this a namelist option?)
-         ! ---
-         call remove_fast_ice(surfaceSpeed, geometryPool)
 
          block => block % next
       end do
+
+      ! calculate velocity-related thermal source term fields
+      ! (do it here to make restarts easier - this way only the fields need to be restart
+      !  variables, rather than the fields that are input to the calculations.)
+      if (solveVelo .and. (trim(config_velocity_solver) /= 'none')) then
+
+         ! (on a restart value, do not try to calculate these - instead use the fields in the restart file)
+         call li_basal_friction(domain, err_tmp)
+         err = ior(err, err_tmp)
+
+         if (trim(config_velocity_solver) == 'sia') then
+            ! For FO solver, heatDissipation is passed back from Albany
+            call li_heat_dissipation_sia(domain, err_tmp)
+            err = ior(err, err_tmp)
+         endif
+      endif
 
       ! === error check
       if (err > 0) then
@@ -783,12 +807,13 @@ contains
       type (mpas_pool_type), pointer :: hydroPool
       type (mpas_pool_type), pointer :: geometryPool
       type (mpas_pool_type), pointer :: velocityPool
+      type (mpas_pool_type), pointer :: thermalPool
       type (mpas_pool_type), pointer :: meshPool
       real (kind=RKIND), dimension(:), pointer :: betaSolve, beta
-      real (kind=RKIND), dimension(:), pointer :: effectivePressure
+      real (kind=RKIND), dimension(:), pointer :: basalTemperature, basalPmpTemperature
       integer, dimension(:), pointer :: cellMask
       logical, pointer :: config_use_glp
-      logical, pointer :: config_beta_use_effective_pressure
+      logical, pointer :: config_beta_thawed_only
       logical, pointer :: hydroActive
       real (kind=RKIND) :: betaAccum
       integer :: nBetaValues
@@ -801,10 +826,11 @@ contains
       err = 0
 
       call mpas_pool_get_config(liConfigs, 'config_use_glp', config_use_glp)
-      call mpas_pool_get_config(liConfigs, 'config_beta_use_effective_pressure', config_beta_use_effective_pressure)
+      call mpas_pool_get_config(liConfigs, 'config_beta_thawed_only', config_beta_thawed_only)
 
       call mpas_pool_get_subpool(block % structs, 'geometry', geometryPool)
       call mpas_pool_get_subpool(block % structs, 'velocity', velocityPool)
+      call mpas_pool_get_subpool(block % structs, 'thermal', thermalPool)
       call mpas_pool_get_subpool(block % structs, 'mesh', meshPool)
 
       call mpas_pool_get_array(velocityPool, 'betaSolve', betaSolve)
@@ -813,54 +839,14 @@ contains
 
       betaSolve = beta
 
-      if (config_beta_use_effective_pressure) then
-         call mpas_pool_get_package(liPackages, 'hydroActive', hydroActive)
-         if (.not. hydroActive) then
-            call mpas_log_write("config_beta_use_effective_pressure can only be used if the subglacial hydrology model " // &
-                 "is active.", MPAS_LOG_ERR)
-            err = ior(err, 1)
-            return
-         endif
-         call mpas_pool_get_subpool(block % structs, 'hydro', hydroPool)
-         call mpas_pool_get_array(hydroPool, 'effectivePressure', effectivePressure)
-         betaSolve = betaSolve * effectivePressure
-
-         ! if using N-based friction with GLP, copy the value of beta across the grounding line
-         ! to the floating side for the GLP to work properly
-         if (config_use_glp) then
-            call mpas_pool_get_dimension(meshPool, 'nCells', nCells)
-            call mpas_pool_get_array(meshPool, 'nEdgesOnCell', nEdgesOnCell)
-            call mpas_pool_get_array(meshPool, 'cellsOnCell', cellsOnCell)
-
-            do iCell = 1, nCells
-               if (li_mask_is_floating_ice(cellMask(iCell))) then
-                  nBetaValues = 0
-                  betaAccum = 0.0_RKIND
-                  do iCell2 = 1, nEdgesOnCell(iCell)
-                     neighbor = cellsOnCell(iCell2, iCell)
-                     if (li_mask_is_grounded_ice(cellMask(neighbor))) then
-                        betaAccum = betaAccum + betaSolve(neighbor)
-                        nBetaValues = nBetaValues + 1
-                     endif
-                  enddo
-                  if (nBetaValues > 0) then
-                     betaSolve(iCell) = betaAccum / real(nBetaValues, kind=RKIND)  ! take average of neighboring betas
-                     ! <  TODO: could do this in log space
-                  endif
-               endif ! if iCell is floating
-            enddo ! cell loop
-         endif ! is using GLP with hydro friction law
-         ! TODO: not sure if halo update needed here.
-
-      end if ! if config_beta_use_effective_pressure
-
-
-      if (.not. config_use_glp) then
-         where (li_mask_is_floating_ice(cellMask))
-            betaSolve = 0.0_RKIND
+      if (config_beta_thawed_only) then
+         call mpas_pool_get_array(thermalPool, 'basalTemperature', basalTemperature)
+         call mpas_pool_get_array(thermalPool, 'basalPmpTemperature', basalPmpTemperature)
+         where (basalPmpTemperature - basalTemperature > 0.01_RKIND)
+            ! Use a small difference to account for roundoff.  0.01 is value used in thermal module.
+            betaSolve = 1.0e6_RKIND  ! no-slip value for frozen bed locations
          end where
       endif
-
 
    !--------------------------------------------------------------------
    end subroutine calculate_beta
@@ -868,25 +854,33 @@ contains
 
 !***********************************************************************
 !
-!  routine calculate_strain_rates
+!  routine calculate_strain_rates_and_stresses
 !
-!> \brief  Calulates strain rates on cell centers
+!> \brief  Calulates strain rates and stresses on cell centers
 !> \author Matt Hoffman
 !> \date   Feb. 2018
 !> \details
-!>  This routine calculates strain rates on cell centers.
+!>  This routine calculates strain rates and stresses on cell centers.
 !
 !-----------------------------------------------------------------------
 
-   subroutine calculate_strain_rates(meshPool, velocityPool, err)
+   subroutine calculate_strain_rates_and_stresses(meshPool, geometryPool, thermalPool, scratchPool, velocityPool, err)
 
       use li_setup
+      use li_diagnostic_vars
 
       !-----------------------------------------------------------------
       ! input variables
       !-----------------------------------------------------------------
       type (mpas_pool_type), intent(in) :: &
          meshPool                                     !< Input: mesh object
+
+      type (mpas_pool_type), intent(in) :: &
+         geometryPool                                 !< Input: geometry object
+      type (mpas_pool_type), intent(in) :: &
+         thermalPool                                  !< Input: thermal object
+      type (mpas_pool_type), intent(in) :: &
+         scratchPool                                  !< Input: scratch object
 
       !-----------------------------------------------------------------
       ! input/output variables
@@ -902,44 +896,118 @@ contains
       !-----------------------------------------------------------------
       ! local variables
       !-----------------------------------------------------------------
-      real(kind=RKIND), dimension(:), pointer :: exx, eyy, exy, eyx, eTheta, eMax, eMin
-      real(kind=RKIND), dimension(:,:), pointer :: uReconstructX, uReconstructY
+      real(kind=RKIND), dimension(:), pointer :: exx, eyy, exy, eTheta, eMax, eMin, dudy, dvdx
+      real(kind=RKIND), dimension(:), pointer :: xvelmean, yvelmean
+      real(kind=RKIND), dimension(:), pointer :: tauxx, tauyy, tauxy, tauMax, tauMin
       integer :: err_tmp
+
+      real(kind=RKIND), pointer :: config_flowLawExponent
+
+      real (kind=RKIND), dimension(:), pointer :: thickness
+      real (kind=RKIND), dimension(:,:), pointer :: temperature
+      real (kind=RKIND), dimension(:,:), pointer :: flowParamA
+      real (kind=RKIND), dimension(:), pointer :: effectiveViscosity
+      real (kind=RKIND), dimension(:), pointer :: stiffnessFactor
+
+      type (field1dReal), pointer :: meanFlowParamAVar
+      real (kind=RKIND), dimension(:), pointer :: meanFlowParamA
+
+      integer, pointer :: nVertLevels
+      integer, pointer :: nCells
+
+      integer :: iCell
+
+      real(kind=RKIND) :: eEff
 
       err = 0
 
-      call mpas_pool_get_array(velocityPool, 'uReconstructX', uReconstructX)
-      call mpas_pool_get_array(velocityPool, 'uReconstructY', uReconstructY)
+      call mpas_pool_get_array(velocityPool, 'xvelmean', xvelmean)
+      call mpas_pool_get_array(velocityPool, 'yvelmean', yvelmean)
+
+      call mpas_pool_get_config(liConfigs, 'config_flowLawExponent', config_flowLawExponent)
+
+      call mpas_pool_get_dimension(meshPool, 'nVertLevels', nVertLevels)
+      call mpas_pool_get_dimension(meshPool, 'nCells', nCells)
+
       call mpas_pool_get_array(velocityPool, 'exx', exx)
       call mpas_pool_get_array(velocityPool, 'eyy', eyy)
+      call mpas_pool_get_array(velocityPool, 'dudy', dudy)
+      call mpas_pool_get_array(velocityPool, 'dvdx', dvdx)
       call mpas_pool_get_array(velocityPool, 'exy', exy)
-      call mpas_pool_get_array(velocityPool, 'eyx', eyx)
       call mpas_pool_get_array(velocityPool, 'eTheta', eTheta)
       call mpas_pool_get_array(velocityPool, 'eMax', eMax)
       call mpas_pool_get_array(velocityPool, 'eMin', eMin)
 
+      call mpas_pool_get_array(velocityPool, 'tauxx', tauxx)
+      call mpas_pool_get_array(velocityPool, 'tauyy', tauyy)
+      call mpas_pool_get_array(velocityPool, 'tauxy', tauxy)
+      call mpas_pool_get_array(velocityPool, 'tauMax', tauMax)
+      call mpas_pool_get_array(velocityPool, 'tauMin', tauMin)
+
+      call mpas_pool_get_array(thermalPool, 'temperature', temperature)
+      call mpas_pool_get_array(velocityPool, 'flowParamA', flowParamA)
+      call mpas_pool_get_array(velocityPool, 'stiffnessFactor', stiffnessFactor)
+
+      call mpas_pool_get_array(geometryPool, 'thickness', thickness)
+      call mpas_pool_get_array(geometryPool, 'effectiveViscosity', effectiveViscosity)
+
+      call mpas_pool_get_field(scratchPool, 'meanFlowParamA', meanFlowParamAVar)
+      call mpas_allocate_scratch_field(meanFlowParamAVar, .true.)
+      meanFlowParamA => meanFlowParamAVar % array
+
       ! Calculate strain rates
-      call li_compute_gradient_2d(meshPool, uReconstructX(1,:), exx, exy, err_tmp)
+      call li_compute_gradient_2d(meshPool, xvelmean, exx, dudy, err_tmp)
       err = ior(err, err_tmp)
 
-      call li_compute_gradient_2d(meshPool, uReconstructY(1,:), eyx, eyy, err_tmp)
+      call li_compute_gradient_2d(meshPool, yvelmean, dvdx, eyy, err_tmp)
       err = ior(err, err_tmp)
+
+      exy = 0.5_RKIND * (dudy + dvdx)
 
       ! Calculate principal strain rate angle
-      eTheta = 0.5_RKIND * atan( (exy + eyx) / (exx - eyy + 1.0e-42_RKIND) )
+      eTheta = 0.5_RKIND * atan( (2.0_RKIND * exy) / (exx - eyy + 1.0e-42_RKIND) )
 
       ! Calculate principal strain rates
-      eMax = 0.5_RKIND * (exx + eyy) + sqrt( (0.5_RKIND * (exx - eyy))**2 + (0.25_RKIND*(exy + eyx))**2)
-      eMin = 0.5_RKIND * (exx + eyy) - sqrt( (0.5_RKIND * (exx - eyy))**2 + (0.25_RKIND*(exy + eyx))**2)
+      eMax = 0.5_RKIND * (exx + eyy) + sqrt( (0.5_RKIND * (exx - eyy))**2 + exy**2)
+      eMin = 0.5_RKIND * (exx + eyy) - sqrt( (0.5_RKIND * (exx - eyy))**2 + exy**2)
+
+      call li_calculate_flowParamA(meshPool, temperature, thickness, flowParamA, err_tmp)
+      err = ior(err, err_tmp)
+
+      ! calculate the depth-averaged flow parameter A
+      meanFlowParamA(:) = sum(flowParamA(:,:), dim=1)/REAL(nVertLevels, kind=RKIND)
+
+      ! calculate effective viscosity from strain rate and flow param.
+      do iCell = 1, nCells
+         eEff = sqrt(exx(iCell)**2 + eyy(iCell)**2 + exx(iCell)*eyy(iCell) + exy(iCell)**2) ! effective strain rate
+         if (eEff == 0.0_RKIND) then
+            effectiveViscosity(iCell) = 0.0_RKIND
+         else
+            effectiveViscosity(iCell) = &
+            0.5_RKIND*stiffnessFactor(iCell)*meanFlowParamA(iCell)**(-1.0_RKIND/config_flowLawExponent)* &
+            eEff**((1.0_RKIND-config_flowLawExponent)/config_flowLawExponent)
+         endif
+      enddo
+
+      ! calculate deviatoric stresses
+      tauxx(:) = 2.0_RKIND*effectiveViscosity(:)*exx(:)
+      tauyy(:) = 2.0_RKIND*effectiveViscosity(:)*eyy(:)
+      tauxy(:) = 2.0_RKIND*effectiveViscosity(:)*exy(:)
+
+      ! calculate principal stresses
+      tauMin(:) = (tauxx(:)+tauyy(:))/2.0_RKIND - sqrt(((tauxx(:)-tauyy(:))/2.0_RKIND)**2 + tauxy(:)**2)
+      tauMax(:) = (tauxx(:)+tauyy(:))/2.0_RKIND + sqrt(((tauxx(:)-tauyy(:))/2.0_RKIND)**2 + tauxy(:)**2)
+
+      call mpas_deallocate_scratch_field(meanFlowParamAVar, .true.)
 
    !--------------------------------------------------------------------
-   end subroutine calculate_strain_rates
+   end subroutine calculate_strain_rates_and_stresses
 
 !***********************************************************************
 !
 !  routine remove_fast_ice
 !
-!> \brief  Removes floating ice with a fast surface speed, presumably an iceberg
+!> \brief  Removes ice with a fast surface speed, presumably an iceberg
 !> \author Matt Hoffman
 !> \date   March 2018
 !> \details
@@ -947,18 +1015,21 @@ contains
 !
 !-----------------------------------------------------------------------
 
-   subroutine remove_fast_ice(surfaceSpeed, geometryPool)
+   subroutine remove_fast_ice(meshPool, uReconstructX, uReconstructY, normalVelocity, geometryPool)
 
       use li_mask
 
       !-----------------------------------------------------------------
       ! input variables
       !-----------------------------------------------------------------
-      real(kind=RKIND), dimension(:) :: surfaceSpeed
+      type (mpas_pool_type), intent(in) :: meshPool
 
       !-----------------------------------------------------------------
       ! input/output variables
       !-----------------------------------------------------------------
+      real(kind=RKIND), dimension(:,:), intent(inout) :: uReconstructX
+      real(kind=RKIND), dimension(:,:), intent(inout) :: uReconstructY
+      real(kind=RKIND), dimension(:,:), intent(inout) :: normalVelocity
       type (mpas_pool_type), intent(inout) :: geometryPool
 
       !-----------------------------------------------------------------
@@ -968,19 +1039,51 @@ contains
       !-----------------------------------------------------------------
       ! local variables
       !-----------------------------------------------------------------
+      real(kind=RKIND), pointer :: config_unrealistic_velocity
+      integer, pointer :: nCells
+      integer, dimension(:), pointer :: nEdgesOnCell
+      integer, dimension(:,:), pointer :: edgesOnCell
       real(kind=RKIND), dimension(:), pointer :: thickness, calvingThickness
+      real(kind=RKIND), dimension(:), pointer :: upperSurface, lowerSurface
       integer, dimension(:), pointer :: cellMask
-      real(kind=RKIND), parameter :: highSpeed = 0.00318471337_RKIND ! 100,000 m/yr in m/s
+      integer :: iCell, iEdgeOnCell, iEdge
+      integer :: cellCount
 
+      call mpas_pool_get_config(liConfigs, 'config_unrealistic_velocity', config_unrealistic_velocity)
+      call mpas_pool_get_dimension(meshPool, 'nCells', nCells)
+      call mpas_pool_get_array(meshPool, 'nEdgesOnCell', nEdgesOnCell)
+      call mpas_pool_get_array(meshPool, 'edgesOnCell', edgesOnCell)
       call mpas_pool_get_array(geometryPool, 'cellMask', cellMask)
       call mpas_pool_get_array(geometryPool, 'thickness', thickness)
       call mpas_pool_get_array(geometryPool, 'calvingThickness', calvingThickness)
+      call mpas_pool_get_array(geometryPool, 'upperSurface', upperSurface)
+      call mpas_pool_get_array(geometryPool, 'lowerSurface', lowerSurface)
 
-      where (li_mask_is_floating_ice(cellMask) .and. (surfaceSpeed > highSpeed))
+
+      cellCount = 0
+      do iCell = 1, nCells
+         if ((li_mask_is_ice(cellMask(iCell))) .and. &
+            (sqrt(uReconstructX(1,iCell)**2 + uReconstructY(1,iCell)**2) > config_unrealistic_velocity)) then
          ! "fast" ice that is removed is added to the calving flux
-         calvingThickness = calvingThickness + thickness
-         thickness = 0.0_RKIND
-      end where
+            calvingThickness(iCell) = calvingThickness(iCell) + thickness(iCell)
+            thickness(iCell) = 0.0_RKIND
+            uReconstructX(:,iCell) = 0.0_RKIND
+            uReconstructY(:,iCell) = 0.0_RKIND
+            do iEdgeOnCell = 1, nEdgesOnCell(iCell)
+               iEdge = edgesOnCell(iEdgeOnCell,iCell)
+               normalVelocity(:,iEdge) = 0.0_RKIND
+            enddo
+            upperSurface(iCell) = 0.0_RKIND
+            lowerSurface(iCell) = 0.0_RKIND
+            ! TODO Should also zero temperature/tracers
+            cellCount = cellCount + 1
+         endif
+      end do
+
+      if (cellCount > 0) then
+         call mpas_log_write("Removed $i cells due to speeds greater than $r m/s.", &
+            intArgs=(/cellCount/), realArgs=(/config_unrealistic_velocity/))
+      endif
 
    !--------------------------------------------------------------------
    end subroutine remove_fast_ice

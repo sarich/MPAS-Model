@@ -1,10 +1,3 @@
-! Copyright (c) 2013,  Los Alamos National Security, LLC (LANS)
-! and the University Corporation for Atmospheric Research (UCAR).
-!
-! Unless noted otherwise source code is licensed under the BSD license.
-! Additional copyright and license information can be found in the LICENSE file
-! distributed with this code, or at http://mpas-dev.github.com/license.html
-!
 module seaice_core_interface
 
    use mpas_derived_types
@@ -111,6 +104,9 @@ module seaice_core_interface
       ! set up analysis member packages
       call seaice_analysis_setup_packages(configPool, packagePool, iocontext, ierr)
 
+      ! icebergs
+      call setup_packages_bergs(configPool, packagePool, ierr)
+
       ! testing system test
       call setup_packages_other(configPool, packagePool, ierr)
 
@@ -138,69 +134,52 @@ module seaice_core_interface
           config_use_velocity_solver
 
      character(len=strKIND), pointer :: &
-          config_stress_divergence_scheme, &
-          config_variational_basis
+          config_strain_scheme, &
+          config_stress_divergence_scheme
 
      logical, pointer :: &
           pkgWeakActive, &
           pkgVariationalActive, &
-          pkgWachspressActive, &
-          pkgPieceWiseLinearActive
+          pkgWeakVariationalActive
 
      !pkgWeak
      !pkgVariational
-     !pkgWachspress
-     !pkgPieceWiseLinear
 
      call MPAS_pool_get_config(configPool, "config_use_velocity_solver", config_use_velocity_solver)
+     call MPAS_pool_get_config(configPool, "config_strain_scheme", config_strain_scheme)
      call MPAS_pool_get_config(configPool, "config_stress_divergence_scheme", config_stress_divergence_scheme)
-     call MPAS_pool_get_config(configPool, "config_variational_basis", config_variational_basis)
 
      call MPAS_pool_get_package(packagePool, "pkgWeakActive", pkgWeakActive)
      call MPAS_pool_get_package(packagePool, "pkgVariationalActive", pkgVariationalActive)
-     call MPAS_pool_get_package(packagePool, "pkgWachspressActive", pkgWachspressActive)
-     call MPAS_pool_get_package(packagePool, "pkgPieceWiseLinearActive", pkgPieceWiseLinearActive)
+     call MPAS_pool_get_package(packagePool, "pkgWeakVariationalActive", pkgWeakVariationalActive)
 
      ! is the velocity solver on
      if (config_use_velocity_solver) then
 
         ! stress divergence scheme
-        if (trim(config_stress_divergence_scheme) == "weak") then
+        if (trim(config_strain_scheme)            == "weak" .or. &
+            trim(config_stress_divergence_scheme) == "weak") then
 
            ! weak stress divergence scheme
            pkgWeakActive = .true.
 
-        else if (trim(config_stress_divergence_scheme) == "variational") then
+        endif
+
+        if (trim(config_strain_scheme)            == "variational" .or. &
+            trim(config_stress_divergence_scheme) == "variational") then
 
            ! variational stress divergence scheme
            pkgVariationalActive = .true.
 
-           ! variational basis function scheme
-           if (trim(config_variational_basis) == "wachspress") then
+        endif
 
-              ! wachspress basis functions
-              pkgWachspressActive = .true.
+        if (trim(config_strain_scheme)            == "weak" .and. &
+            trim(config_stress_divergence_scheme) == "variational") then
 
-           else if (trim(config_variational_basis) == "pwl") then
+           ! weak strain / variational stress divergence
+           pkgWeakVariationalActive = .true.
 
-              ! piecewise linear basis functions
-              pkgPieceWiseLinearActive = .true.
-
-           else
-
-              ! unknown value of config_variational_basis
-              call mpas_log_write("Unknown variational scheme: "//trim(config_variational_basis))
-              ierr = 1
-
-           endif ! config_variational_basis
-
-        else
-
-           ! unknown value of config_stress_divergence_scheme
-           call mpas_log_write("Unknown stress divergence scheme: "//trim(config_stress_divergence_scheme))
-           ierr = 1
-
-        endif ! config_stress_divergence_scheme
+        endif
 
      endif ! config_use_velocity_solver
 
@@ -257,7 +236,9 @@ module seaice_core_interface
           config_use_humics, &
           config_use_DON, &
           config_use_iron, &
-          config_use_zaerosols
+          config_use_zaerosols, &
+          config_use_snow_grain_radius, &
+          config_use_effective_snow_density
 
      logical, pointer :: &
           pkgColumnTracerIceAgeActive, &
@@ -289,7 +270,9 @@ module seaice_core_interface
           pkgTracerVerticalDONActive, &
           pkgTracerVerticalIronActive, &
           pkgTracerZAerosolsActive, &
-          pkgTracerZSalinityActive
+          pkgTracerZSalinityActive, &
+          pkgColumnTracerEffectiveSnowDensityActive, &
+          pkgColumnTracerSnowGrainRadiusActive
 
      ! other packages
      logical, pointer :: &
@@ -356,6 +339,8 @@ module seaice_core_interface
      !pkgTracerVerticalIron
      !pkgTracerZAerosols
      !pkgTracerZSalinity
+     !pkgColumnTracerEffectiveSnowDensity
+     !pkgColumnTracerSnowGrainRadius
 
      call MPAS_pool_get_config(configPool, "config_use_ice_age", config_use_ice_age)
      call MPAS_pool_get_config(configPool, "config_use_first_year_ice", config_use_first_year_ice)
@@ -380,6 +365,8 @@ module seaice_core_interface
      call MPAS_pool_get_config(configPool, "config_use_DON", config_use_DON)
      call MPAS_pool_get_config(configPool, "config_use_iron", config_use_iron)
      call MPAS_pool_get_config(configPool, "config_use_zaerosols", config_use_zaerosols)
+     call MPAS_pool_get_config(configPool, "config_use_effective_snow_density", config_use_effective_snow_density)
+     call MPAS_pool_get_config(configPool, "config_use_snow_grain_radius", config_use_snow_grain_radius)
 
      call MPAS_pool_get_package(packagePool, "pkgColumnTracerIceAgeActive", pkgColumnTracerIceAgeActive)
      call MPAS_pool_get_package(packagePool, "pkgColumnTracerFirstYearIceActive", pkgColumnTracerFirstYearIceActive)
@@ -411,6 +398,8 @@ module seaice_core_interface
      call MPAS_pool_get_package(packagePool, "pkgTracerVerticalIronActive", pkgTracerVerticalIronActive)
      call MPAS_pool_get_package(packagePool, "pkgTracerZAerosolsActive", pkgTracerZAerosolsActive)
      call MPAS_pool_get_package(packagePool, "pkgTracerZSalinityActive", pkgTracerZSalinityActive)
+     call MPAS_pool_get_package(packagePool, "pkgColumnTracerEffectiveSnowDensityActive", pkgColumnTracerEffectiveSnowDensityActive)
+     call MPAS_pool_get_package(packagePool, "pkgColumnTracerSnowGrainRadiusActive", pkgColumnTracerSnowGrainRadiusActive)
 
      use_meltponds = (config_use_cesm_meltponds .or. config_use_level_meltponds .or. config_use_topo_meltponds)
 
@@ -446,6 +435,9 @@ module seaice_core_interface
      pkgTracerZAerosolsActive            = config_use_zaerosols
      pkgTracerZSalinityActive            = config_use_vertical_zsalinity
 
+     pkgColumnTracerEffectiveSnowDensityActive = config_use_effective_snow_density
+     pkgColumnTracerSnowGrainRadiusActive = config_use_snow_grain_radius
+
      if (.not. config_use_column_package) then
         pkgColumnTracerIceAgeActive       = .false.
         pkgColumnTracerFirstYearIceActive = .false.
@@ -477,6 +469,8 @@ module seaice_core_interface
         pkgTracerVerticalIronActive         = .false.
         pkgTracerZAerosolsActive            = .false.
         pkgTracerZSalinityActive            = .false.
+        pkgColumnTracerEffectiveSnowDensityActive = .false.
+        pkgColumnTracerSnowGrainRadiusActive      = .false.
      endif
 
      if (.not. config_use_column_biogeochemistry .and. config_use_column_package) then
@@ -531,6 +525,43 @@ module seaice_core_interface
 
    !***********************************************************************
    !
+   !  routine setup_packages_bergs
+   !
+   !> \brief   Setup icebergs package
+   !> \author  Darin Comeau
+   !> \date    19 May 2017
+   !> \details This routine is intended to set the icebergs package PkgBergs
+   !> as active/deactive based on the namelist option config_use_bergs.
+   !
+   !-----------------------------------------------------------------------
+
+   subroutine setup_packages_bergs(configPool, packagePool, ierr)!{{{
+
+     type (mpas_pool_type), intent(in) :: configPool
+     type (mpas_pool_type), intent(in) :: packagePool
+     integer, intent(out) :: ierr
+
+          ! icebergs package
+     logical, pointer :: &
+          config_use_data_icebergs
+
+     logical, pointer :: &
+          pkgBergsActive
+
+     ierr = 0
+
+     !-----------------------------------------------------------------------
+     ! iceberg routines
+     !-----------------------------------------------------------------------
+
+     call MPAS_pool_get_config(configPool, "config_use_data_icebergs", config_use_data_icebergs)
+     call MPAS_pool_get_package(packagePool, "pkgBergsActive", pkgBergsActive)
+     pkgBergsActive = config_use_data_icebergs
+
+   end subroutine setup_packages_bergs!}}}
+
+   !***********************************************************************
+   !
    !  routine setup_packages_other
    !
    !> \brief
@@ -549,22 +580,32 @@ module seaice_core_interface
 
      logical, pointer :: &
           config_use_forcing, &
-          config_testing_system_test
+          config_use_data_icebergs, &
+          config_testing_system_test, &
+          config_use_snicar_ad, &
+          config_use_prescribed_ice, &
+          config_use_special_boundaries_velocity, &
+          config_use_special_boundaries_velocity_masks, &
+          config_use_special_boundaries_zero_tracers
 
      logical, pointer :: &
           pkgForcingActive, &
-          pkgTestingSystemTestActive
+          pkgTestingSystemTestActive, &
+          pkgSnicarActive, &
+          pkgPrescribedActive, &
+          pkgSpecialBoundariesActive
 
      ierr = 0
 
      ! pkgForcing
 
      call MPAS_pool_get_config(configPool, "config_use_forcing", config_use_forcing)
+     call MPAS_pool_get_config(configPool, "config_use_data_icebergs", config_use_data_icebergs)
 
      call MPAS_pool_get_package(packagePool, "pkgForcingActive", pkgForcingActive)
 
      ! see if we are using the forcing system
-     if (config_use_forcing) then
+     if (config_use_forcing .or. config_use_data_icebergs) then
 
         pkgForcingActive = .true.
 
@@ -578,9 +619,31 @@ module seaice_core_interface
 
      ! see if we are testing the testing system
      if (config_testing_system_test) then
-
         pkgTestingSystemTestActive = .true.
+     endif
 
+     ! pkgSnicar
+     call MPAS_pool_get_config(configPool, "config_use_snicar_ad", config_use_snicar_ad)
+     call MPAS_pool_get_package(packagePool, "pkgSnicarActive", pkgSnicarActive)
+     ! see if we are using the snicar_ad system
+     pkgSnicarActive = .true.
+
+     ! pkgPrescribed
+     call MPAS_pool_get_config(configPool, "config_use_prescribed_ice", config_use_prescribed_ice)
+     call MPAS_pool_get_package(packagePool, "pkgPrescribedActive", pkgPrescribedActive)
+     if (config_use_prescribed_ice) then
+        pkgPrescribedActive = .true.
+     endif
+
+     ! pkgSpecialBoundaries
+     call MPAS_pool_get_config(configPool, "config_use_special_boundaries_velocity", config_use_special_boundaries_velocity)
+     call MPAS_pool_get_config(configPool, "config_use_special_boundaries_velocity_masks", config_use_special_boundaries_velocity_masks)
+     call MPAS_pool_get_config(configPool, "config_use_special_boundaries_zero_tracers", config_use_special_boundaries_zero_tracers)
+     call MPAS_pool_get_package(packagePool, "pkgSpecialBoundariesActive", pkgSpecialBoundariesActive)
+     if (config_use_special_boundaries_velocity .or. &
+         config_use_special_boundaries_velocity_masks .or. &
+         config_use_special_boundaries_zero_tracers) then
+        pkgSpecialBoundariesActive = .true.
      endif
 
    end subroutine setup_packages_other!}}}
@@ -673,15 +736,16 @@ module seaice_core_interface
    !>  and allow the core to specify details of the configuration.
    !
    !-----------------------------------------------------------------------
-   function seaice_setup_log(logInfo, domain) result(iErr)!{{{
+   function seaice_setup_log(logInfo, domain, unitNumbers) result(iErr)!{{{
 
       use mpas_derived_types
       use mpas_log
 
       implicit none
 
-      type (mpas_log_type), intent(inout), pointer :: logInfo  !< logging information object to set up
-      type (domain_type), intent(in), pointer :: domain  !< domain object to provide info for setting up log manager
+      type (mpas_log_type), intent(inout), pointer :: logInfo    !< logging information object to set up
+      type (domain_type), intent(in), pointer :: domain          !< domain object to provide info for setting up log manager
+      integer, dimension(2), intent(in), optional :: unitNumbers !< Fortran unit numbers to use for output and error logs
       integer :: iErr
 
       ! Local variables
@@ -690,7 +754,7 @@ module seaice_core_interface
       iErr = 0
 
       ! Initialize log manager
-      call mpas_log_init(logInfo, domain, err=local_err)
+      call mpas_log_init(logInfo, domain, unitNumbers=unitNumbers, err=local_err)
       iErr = ior(iErr, local_err)
 
       ! Set core specific options here

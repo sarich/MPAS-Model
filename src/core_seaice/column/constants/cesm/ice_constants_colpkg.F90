@@ -25,8 +25,13 @@
          rhoi      = SHR_CONST_RHOICE ,&! density of ice (kg/m^3)
          rhow      = SHR_CONST_RHOSW  ,&! density of seawater (kg/m^3)
          cp_air    = SHR_CONST_CPDAIR ,&! specific heat of air (J/kg/K)
+
          ! (Briegleb JGR 97 11475-11485  July 1992)
-         emissivity= 0.95_dbl_kind    ,&! emissivity of snow and ice
+         !emissivity= 0.95_dbl_kind    ,&! emissivity of snow and ice
+         ! Emissivity has been changed to unity here so that coupling is
+         ! physically correct - instantaneous radiative coupling in CIME
+         emissivity= 1.0_dbl_kind    ,&! emissivity of snow and ice
+
          cp_ice    = SHR_CONST_CPICE  ,&! specific heat of fresh ice (J/kg/K)
          cp_ocn    = SHR_CONST_CPSW   ,&! specific heat of ocn    (J/kg/K)
                                         ! freshwater value needed for enthalpy
@@ -38,11 +43,12 @@
          dragio    = 0.00536_dbl_kind ,&! ice-ocn drag coefficient
 #endif
 
-         albocn    = 0.06_dbl_kind    ,&! ocean albedo
+         albocn    = 0.06_dbl_kind   ,&! ocean albedo
          gravit    = SHR_CONST_G     ,&! gravitational acceleration (m/s^2)
          viscosity_dyn = 1.79e-3_dbl_kind, & ! dynamic viscosity of brine (kg/m/s)
-         Tocnfrz= -34.0_dbl_kind*depressT,&! freezing temp of seawater (C),
-                                           ! used as Tsfcn for open water
+         Tocnfrz   = -1.8_dbl_kind   ,&! freezing temp of seawater (C), used 
+                                       ! as Tsfcn for open water only when 
+                                       ! tfrz_option is 'minus1p8' or null
          rhofresh  = SHR_CONST_RHOFW ,&! density of fresh water (kg/m^3)
          zvir      = SHR_CONST_ZVIR  ,&! rh2o/rair - 1.0
          vonkar    = SHR_CONST_KARMAN,&! von Karman constant
@@ -80,12 +86,16 @@
          ksno   = 0.30_dbl_kind  ,&! thermal conductivity of snow  (W/m/deg)
          zref   = 10._dbl_kind   ,&! reference height for stability (m)
          hs_min = 1.e-4_dbl_kind ,&! min snow thickness for computing zTsn (m)
-         snowpatch = 0.005_dbl_kind     ! parameter for fractional snow area (m)
+         snowpatch = 0.005_dbl_kind , &  ! parameter for fractional snow area (m)
 !tcx note cice snowpatch = 0.02
 
-      integer (kind=int_kind), parameter :: & 
-         nspint = 3                ! number of solar spectral intervals
-                    
+         ! biogeochemistry
+         sk_l = 0.03_dbl_kind      ! (m) skeletal layer thickness
+
+      integer (kind=int_kind), parameter, public :: &
+         nspint = 3             ,& ! number of solar spectral intervals
+         nspint_5bd = 5            ! number of solar spectral intervals with config_use_snicar_ad
+
       ! weights for albedos 
       ! 4 Jan 2007 BPB  Following are appropriate for complete cloud
       ! in a summer polar atmosphere with 1.5m bare sea ice surface:
@@ -116,6 +126,12 @@
       real(kind=dbl_kind),public :: eccf   ! earth orbit eccentricity factor
       logical(kind=log_kind),public :: log_print ! Flags print of status/error
     
+      ! snow parameters
+      real (kind=dbl_kind), parameter, public :: &
+         snwlvlfac =   0.3_dbl_kind, & ! 30% rule: fractional increase in snow depth
+                                       ! over ridged ice, compared with level ice
+         rhosmin   = 100.0_dbl_kind    ! minimum snow density (kg/m^3)
+
       !-----------------------------------------------------------------
       ! numbers used in column package
       !-----------------------------------------------------------------

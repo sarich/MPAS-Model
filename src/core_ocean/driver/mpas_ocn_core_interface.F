@@ -17,7 +17,9 @@ module ocn_core_interface
 
    use ocn_forward_mode
    use ocn_analysis_mode
+#ifndef EXCLUDE_INIT_MODE
    use ocn_init_mode
+#endif
 
    private
 
@@ -112,15 +114,25 @@ module ocn_core_interface
       logical, pointer :: initModeActive
       logical, pointer :: thicknessFilterActive
       logical, pointer :: splitTimeIntegratorActive
+      logical, pointer :: semiImplicitTimePKGActive
       logical, pointer :: windStressBulkPKGActive
+      logical, pointer :: variableBottomDragPKGActive
       logical, pointer :: tracerBudgetActive
       logical, pointer :: landIcePressurePKGActive
       logical, pointer :: landIceFluxesPKGActive
       logical, pointer :: landIceCouplingPKGActive
       logical, pointer :: thicknessBulkPKGActive
       logical, pointer :: frazilIceActive
+      logical, pointer :: tidalForcingActive
+      logical, pointer :: tidalPotentialForcingPKGActive
+      logical, pointer :: vegetationDragPKGActive
+      logical, pointer :: topographicWaveDragPKGActive
       logical, pointer :: inSituEOSActive
       logical, pointer :: variableShortwaveActive
+      logical, pointer :: gmActive
+      logical, pointer :: timeVaryingAtmosphericForcingPKGActive
+      logical, pointer :: timeVaryingLandIceForcingPKGActive
+      logical, pointer :: gotmPKGActive
 
       type (mpas_pool_iterator_type) :: pkgItr
       logical, pointer :: packageActive
@@ -143,11 +155,22 @@ module ocn_core_interface
 
       logical, pointer :: config_use_freq_filtered_thickness
       logical, pointer :: config_use_frazil_ice_formation
+      logical, pointer :: config_use_tidal_forcing
+      logical, pointer :: config_use_tidal_potential_forcing
+      logical, pointer :: config_use_topographic_wave_drag
+      logical, pointer :: config_use_GM
+      logical, pointer :: config_use_Redi
+      logical, pointer :: config_use_vegetation_drag
+      logical, pointer :: config_use_time_varying_atmospheric_forcing
+      logical, pointer :: config_use_time_varying_land_ice_forcing
+      logical, pointer :: config_use_gotm
+
       character (len=StrKIND), pointer :: config_time_integrator
       character (len=StrKIND), pointer :: config_ocean_run_mode
       character (len=StrKIND), pointer :: config_pressure_gradient_type
       character (len=StrKIND), pointer :: config_sw_absorption_type
 
+      logical, pointer :: config_use_variable_drag
       logical, pointer :: config_use_bulk_wind_stress
       logical, pointer :: config_use_bulk_thickness_flux
       logical, pointer :: config_compute_active_tracer_budgets
@@ -179,14 +202,20 @@ module ocn_core_interface
 
       !
       ! test for integration scheme
-      ! (TDR: this makes no sense, if split or unsplit then splitTimeIntegratorActive = .true.)
       !
       call mpas_pool_get_package(packagePool, 'splitTimeIntegratorActive', splitTimeIntegratorActive)
       call mpas_pool_get_config(configPool, 'config_time_integrator', config_time_integrator)
       if ( forwardModeActive ) then
          if (    config_time_integrator == trim('split_explicit') &
-            .or. config_time_integrator == trim('unsplit_explicit') ) then
+            .or. config_time_integrator == trim('unsplit_explicit') &
+            .or. config_time_integrator == trim('semi_implicit') ) then
             splitTimeIntegratorActive = .true.
+         end if
+      endif
+      call mpas_pool_get_package(packagePool, 'semiImplicitTimePKGActive', semiImplicitTimePKGActive)
+      if ( forwardModeActive ) then
+         if (config_time_integrator == trim('semi_implicit') ) then
+            semiImplicitTimePKGActive = .true.
          end if
       endif
 
@@ -217,6 +246,14 @@ module ocn_core_interface
       call mpas_pool_get_config(configPool, 'config_use_bulk_wind_stress', config_use_bulk_wind_stress)
       if ( config_use_bulk_wind_stress ) then
          windStressBulkPKGActive = .true.
+      end if
+
+      !
+      ! test for variable bottom drag of momentum, variableBottomDragPKG
+      call mpas_pool_get_package(packagePool, 'variableBottomDragPKGActive', variableBottomDragPKGActive)
+      call mpas_pool_get_config(configPool, 'config_use_variable_drag', config_use_variable_drag)
+      if ( config_use_variable_drag ) then
+        variableBottomDragPKGActive = .true.
       end if
 
       !
@@ -268,13 +305,74 @@ module ocn_core_interface
       end if
 
       !
-      ! test for form of pressure gradient computation
+      ! test for use of tidal forcing, tidalForcingActive
       !
-      ! TDR: need to add PKG
-      call mpas_pool_get_package(packagePool, 'inSituEOSActive', inSituEOSActive)
-      call mpas_pool_get_config(configPool, 'config_pressure_gradient_type', config_pressure_gradient_type)
-      if (config_pressure_gradient_type.eq.'Jacobian_from_TS') then
-         inSituEOSActive = .true.
+      call mpas_pool_get_package(packagePool, 'tidalForcingActive', tidalForcingActive)
+      call mpas_pool_get_config(configPool, 'config_use_tidal_forcing', config_use_tidal_forcing)
+      if (config_use_tidal_forcing) then
+         tidalForcingActive = .true.
+      end if
+
+      !
+      ! test for use of tidal potential forcing, tidalPotentialForcingPKGActive
+      !
+      call mpas_pool_get_package(packagePool, 'tidalPotentialForcingPKGActive', tidalPotentialForcingPKGActive)
+      call mpas_pool_get_config(configPool, 'config_use_tidal_potential_forcing', config_use_tidal_potential_forcing)
+      if (config_use_tidal_potential_forcing) then
+         tidalPotentialForcingPKGActive = .true.
+      end if
+
+      !
+      ! test for use of vegetation drag, vegetationDragPKGActive
+      !
+      call mpas_pool_get_package(packagePool, 'vegetationDragPKGActive', vegetationDragPKGActive)
+      call mpas_pool_get_config(configPool, 'config_use_vegetation_drag', config_use_vegetation_drag)
+      if (config_use_vegetation_drag) then
+         vegetationDragPKGActive = .true.
+      end if
+
+      !
+      ! test for use of topographic wave drag, topographicWaveDragPKG
+      !
+      call mpas_pool_get_package(packagePool, 'topographicWaveDragPKGActive', topographicWaveDragPKGActive)
+      call mpas_pool_get_config(configPool, 'config_use_topographic_wave_drag', config_use_topographic_wave_drag)
+      if (config_use_topographic_wave_drag) then
+         topographicWaveDragPKGActive = .true.
+      end if
+
+      !
+      ! test for use of gm
+      !
+      call mpas_pool_get_package(packagePool, 'gmActive', gmActive)
+      call mpas_pool_get_config(configPool, 'config_use_GM', config_use_GM)
+      call mpas_pool_get_config(configPool, 'config_use_Redi', config_use_Redi)
+      if (config_use_GM.or.config_use_Redi) then
+         gmActive = .true.
+      end if
+
+      ! test for time-varying forcing
+      !
+      call mpas_pool_get_package(packagePool, 'timeVaryingAtmosphericForcingPKGActive', timeVaryingAtmosphericForcingPKGActive)
+      call mpas_pool_get_config(configPool, &
+                               'config_use_time_varying_atmospheric_forcing', &
+                                config_use_time_varying_atmospheric_forcing)
+      if (config_use_time_varying_atmospheric_forcing) then
+         timeVaryingAtmosphericForcingPKGActive = .true.
+      endif
+
+      call mpas_pool_get_package(packagePool, 'timeVaryingLandIceForcingPKGActive', timeVaryingLandIceForcingPKGActive)
+      call mpas_pool_get_config(configPool, 'config_use_time_varying_land_ice_forcing', config_use_time_varying_land_ice_forcing)
+      if (config_use_time_varying_land_ice_forcing) then
+         timeVaryingLandIceForcingPKGActive = .true.
+      endif
+
+      !
+      ! test for use of GOTM
+      !
+      call mpas_pool_get_package(packagePool, 'gotmPKGActive', gotmPKGActive)
+      call mpas_pool_get_config(configPool, 'config_use_gotm', config_use_gotm)
+      if (config_use_gotm) then
+         gotmPKGActive = .true.
       end if
 
       !
@@ -287,9 +385,11 @@ module ocn_core_interface
       !
       ! if in init mode, validate configuration
       !
+#ifndef EXCLUDE_INIT_MODE
       if ( initModeActive ) then
          call ocn_init_mode_validate_configuration(configPool, packagePool, iocontext, ierr)
       endif
+#endif
 
       !
       ! iterate over tracer groups
@@ -463,8 +563,10 @@ module ocn_core_interface
          ierr = ocn_forward_mode_setup_clock(core_clock, configs)
       else if ( trim(config_ocean_run_mode) == 'analysis' ) then
          ierr = ocn_analysis_mode_setup_clock(core_clock, configs)
+#ifndef EXCLUDE_INIT_MODE
       else if ( trim(config_ocean_run_mode) == 'init' ) then
          ierr = ocn_init_mode_setup_clock(core_clock, configs)
+#endif
       end if
 
 
@@ -483,15 +585,16 @@ module ocn_core_interface
    !>  and allow the core to specify details of the configuration.
    !
    !-----------------------------------------------------------------------
-   function ocn_setup_log(logInfo, domain) result(iErr)!{{{
+   function ocn_setup_log(logInfo, domain, unitNumbers) result(iErr)!{{{
 
       use mpas_derived_types
       use mpas_log
 
       implicit none
 
-      type (mpas_log_type), intent(inout), pointer :: logInfo  !< logging information object to set up
-      type (domain_type), intent(in), pointer :: domain  !< domain object to provide info for setting up log manager
+      type (mpas_log_type), intent(inout), pointer :: logInfo    !< logging information object to set up
+      type (domain_type), intent(in), pointer :: domain          !< domain object to provide info for setting up log manager
+      integer, dimension(2), intent(in), optional :: unitNumbers !< Fortran unit numbers to use for output and error logs
       integer :: iErr
 
       ! Local variables
@@ -500,7 +603,7 @@ module ocn_core_interface
       iErr = 0
 
       ! Initialize log manager
-      call mpas_log_init(logInfo, domain, err=local_err)
+      call mpas_log_init(logInfo, domain, unitNumbers=unitNumbers, err=local_err)
       iErr = ior(iErr, local_err)
 
       ! Set core specific options here
@@ -539,7 +642,6 @@ module ocn_core_interface
       character(len=StrKIND), intent(out) :: stream
       integer :: ierr
 
-      logical, pointer :: config_do_restart
       character(len=StrKIND), pointer :: config_ocean_run_mode
 
       ierr = 0

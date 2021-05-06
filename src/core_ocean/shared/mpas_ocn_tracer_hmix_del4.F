@@ -27,6 +27,7 @@ module ocn_tracer_hmix_del4
    use mpas_pool_routines
    use mpas_threading
    use ocn_constants
+   use ocn_config
 
    implicit none
    private
@@ -57,7 +58,6 @@ module ocn_tracer_hmix_del4
 
    real (kind=RKIND) :: eddyDiff4
 
-
 !***********************************************************************
 
 contains
@@ -75,7 +75,7 @@ contains
 !
 !-----------------------------------------------------------------------
 
-   subroutine ocn_tracer_hmix_del4_tend(meshPool, scratchPool, layerThicknessEdge, tracers, tend, err)!{{{
+   subroutine ocn_tracer_hmix_del4_tend(meshPool, layerThicknessEdge, tracers, tend, err)!{{{
 
       !-----------------------------------------------------------------
       !
@@ -88,8 +88,6 @@ contains
 
       type (mpas_pool_type), intent(in) :: &
          meshPool          !< Input: mesh information
-
-      type (mpas_pool_type), intent(in) :: scratchPool !< Input: scratch variables
 
       real (kind=RKIND), dimension(:,:,:), intent(in) :: &
         tracers !< Input: tracer quantities
@@ -122,17 +120,15 @@ contains
       integer, pointer :: nVertLevels
       integer, dimension(:), pointer :: nCellsArray, nEdgesArray
 
-      integer, dimension(:), pointer :: maxLevelEdgeTop, maxLevelCell, nEdgesOnCell
+      integer, dimension(:), pointer :: minLevelEdgeBot, maxLevelEdgeTop, minLevelCell, maxLevelCell, nEdgesOnCell
       integer, dimension(:,:), pointer :: edgeMask, cellsOnEdge, edgesOnCell, edgeSignOnCell
 
       real (kind=RKIND) :: invAreaCell1, invAreaCell2, tracer_turb_flux, flux, invdcEdge, r_tmp1, r_tmp2
 
-      !real (kind=RKIND), dimension(:,:,:), allocatable :: delsq_tracer
-      real (kind=RKIND), dimension(:,:,:), pointer :: delsq_tracer
-      type (field3DReal), pointer :: delsq_tracerField
-
       real (kind=RKIND), dimension(:), pointer :: dcEdge, dvEdge, areaCell, meshScalingDel4
 
+      ! Scratch Arrays
+      real (kind=RKIND), dimension(:,:,:), allocatable :: delsq_tracer
 
       !-----------------------------------------------------------------
       !
@@ -153,6 +149,8 @@ contains
       call mpas_pool_get_dimension(meshPool, 'nVertLevels', nVertLevels)
       num_tracers = size(tracers, dim=1)
 
+      call mpas_pool_get_array(meshPool, 'minLevelEdgeBot', minLevelEdgeBot)
+      call mpas_pool_get_array(meshPool, 'minLevelCell', minLevelCell)
       call mpas_pool_get_array(meshPool, 'maxLevelEdgeTop', maxLevelEdgeTop)
       call mpas_pool_get_array(meshPool, 'maxLevelCell', maxLevelCell)
       call mpas_pool_get_array(meshPool, 'cellsOnEdge', cellsOnEdge)
@@ -168,19 +166,13 @@ contains
       call mpas_pool_get_array(meshPool, 'edgesOnCell', edgesOnCell)
       call mpas_pool_get_array(meshPool, 'edgeSignOnCell', edgeSignOnCell)
 
-      !allocate(delsq_tracer(num_tracers,nVertLevels, nCells+1))
-      call mpas_pool_get_field(scratchPool, 'delsq_tracer', delsq_tracerField)
-
-      call mpas_allocate_scratch_field(delsq_tracerField, .true.)
-
-      call mpas_threading_barrier()
-
-      delsq_tracer => delsq_tracerField % array
+      allocate(delsq_tracer(num_tracers, nVertLevels, nCells))
 
       ! Need 1 halo around owned cells
       nCells = nCellsArray( 2 )
 
       ! first del2: div(h \nabla \phi) at cell center
+      !$omp parallel
       !$omp do schedule(runtime) private(invAreaCell1, i, iEdge, invdcEdge, cell1, cell2, k, iTracer, r_tmp1, r_tmp2)
       do iCell = 1, nCells
         delsq_tracer(:, :, iCell) = 0.0_RKIND
@@ -191,7 +183,7 @@ contains
           cell1 = cellsOnEdge(1,iEdge)
           cell2 = cellsOnEdge(2,iEdge)
 
-          do k = 1, maxLevelEdgeTop(iEdge)
+          do k = minLevelEdgeBot(iEdge), maxLevelEdgeTop(iEdge)
             do iTracer = 1, num_tracers * edgeMask(k, iEdge)
 
               r_tmp1 = invdcEdge * layerThicknessEdge(k, iEdge) * tracers(iTracer, k, cell1)
@@ -204,11 +196,13 @@ contains
         end do
       end do
       !$omp end do
+      !$omp end parallel
 
       ! Only need tendency on owned cells
       nCells = nCellsArray( 1 )
 
       ! second del2: div(h \nabla [delsq_tracer]) at cell center
+      !$omp parallel
       !$omp do schedule(runtime) private(invAreaCell1, i, iEdge, cell1, cell2, invdcEdge, k, iTracer, tracer_turb_flux, flux)
       do iCell = 1, nCells
         invAreaCell1 = 1.0_RKIND / areaCell(iCell)
@@ -219,7 +213,7 @@ contains
 
           invdcEdge = meshScalingDel4(iEdge) * dvEdge(iEdge) * eddyDiff4 / dcEdge(iEdge)
 
-          do k = 1, maxLevelEdgeTop(iEdge)
+          do k = minLevelEdgeBot(iEdge), maxLevelEdgeTop(iEdge)
             do iTracer = 1, num_tracers * edgeMask(k, iEdge)
               tracer_turb_flux = (delsq_tracer(iTracer, k, cell2) - delsq_tracer(iTracer, k, cell1))
 
@@ -231,9 +225,9 @@ contains
         end do
       end do
       !$omp end do
+      !$omp end parallel
 
-      call mpas_threading_barrier()
-      call mpas_deallocate_scratch_field(delsq_tracerField, .true.)
+      deallocate(delsq_tracer)
 
       call mpas_timer_stop("tracer del4")
 
@@ -266,13 +260,7 @@ contains
 
       integer, intent(out) :: err !< Output: error flag
 
-      logical, pointer :: config_use_tracer_del4
-      real (kind=RKIND), pointer :: config_tracer_del4
-
       err = 0
-
-      call mpas_pool_get_config(ocnConfigs, 'config_use_tracer_del4', config_use_tracer_del4)
-      call mpas_pool_get_config(ocnConfigs, 'config_tracer_del4', config_tracer_del4)
 
       del4on = .false.
 

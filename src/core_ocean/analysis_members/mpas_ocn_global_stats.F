@@ -26,7 +26,8 @@ module ocn_global_stats
    use mpas_stream_manager
 
    use ocn_constants
-   use ocn_diagnostics_routines
+   use ocn_config
+   use ocn_diagnostics_variables
 
    implicit none
    private
@@ -103,14 +104,10 @@ contains
       !-----------------------------------------------------------------
 
       type (dm_info), pointer :: dminfo
-      logical, pointer :: config_AM_globalStats_text_file
-      character (len=StrKIND), pointer :: config_AM_globalStats_directory
       integer :: fileID, i
 
       err = 0
 
-      call mpas_pool_get_config(domain % configs, 'config_AM_globalStats_directory', config_AM_globalStats_directory)
-      call mpas_pool_get_config(domain % configs, 'config_AM_globalStats_text_file', config_AM_globalStats_text_file)
       if (config_AM_globalStats_text_file) then
       dminfo => domain % dminfo
       if (dminfo % my_proc_id == IO_NODE) then
@@ -225,7 +222,6 @@ contains
       type (mpas_pool_type), pointer :: tracersPool
       type (mpas_pool_type), pointer :: meshPool
       type (mpas_pool_type), pointer :: scratchPool
-      type (mpas_pool_type), pointer :: diagnosticsPool
       type (mpas_pool_type), pointer :: forcingPool
       type (mpas_pool_type), pointer :: tracersSurfaceFluxPool
       type (mpas_pool_type), pointer :: tracersSurfaceRestoringFieldsPool
@@ -241,7 +237,6 @@ contains
       integer, dimension(:), pointer :: maxLevelCell, maxLevelEdgeTop, maxLevelVertexBot, &
          landiceMask
 
-      character (len=StrKIND), pointer :: xtime, simulationStartTime
       type (MPAS_Time_type) :: xtime_timeType, simulationStartTime_timeType
       type (MPAS_TimeInterval_type) :: timeStep
 
@@ -251,24 +246,21 @@ contains
                                     absoluteFreshWaterConservation, relativeFreshWaterConservation, &
                                     landIceFloatingAreaSum
       real (kind=RKIND), dimension(:), pointer ::  areaCell, dcEdge, dvEdge, areaTriangle, areaEdge, landIceFloatingArea
-      real (kind=RKIND), dimension(:,:), pointer :: layerThickness, normalVelocity, tangentialVelocity, layerThicknessEdge, &
-            relativeVorticity, kineticEnergyCell, normalizedRelativeVorticityEdge, &
-            normalizedPlanetaryVorticityEdge, pressure, montgomeryPotential, &
-            vertAleTransportTop, vertVelocityTop, lowFreqDivergence, highFreqThickness, &
-            density, layerThicknessPreviousTimestep, activeTracersSurfaceFlux, &
+      real (kind=RKIND), dimension(:,:), pointer :: layerThickness, normalVelocity, &
+            lowFreqDivergence, highFreqThickness, &
+            layerThicknessPreviousTimestep, activeTracersSurfaceFlux, &
             activeTracersPistonVelocity, activeTracersSurfaceRestoringValue
 
       real (kind=RKIND), dimension(:,:,:), pointer :: activeTracers
 
       real (kind=RKIND), dimension(:), pointer :: evaporationFlux, snowFlux
-      real (kind=RKIND), dimension(:), pointer :: seaIceFreshWaterFlux, riverRunoffFlux, iceRunoffFlux
+      real (kind=RKIND), dimension(:), pointer :: seaIceFreshWaterFlux, icebergFreshWaterFlux, riverRunoffFlux, iceRunoffFlux
       real (kind=RKIND), dimension(:), pointer :: rainFlux, landIceFreshwaterFlux
       real (kind=RKIND), dimension(:), pointer :: accumulatedLandIceMass, accumulatedLandIceHeat, &
           accumulatedLandIceFrazilMass
 
       real (kind=RKIND), dimension(:,:), pointer :: frazilLayerThicknessTendency
 
-      real (kind=RKIND), pointer :: daysSinceStartOfSim
       real (kind=RKIND), dimension(:), pointer :: minGlobalStats,maxGlobalStats,sumGlobalStats, averages, rms, verticalSumMins, &
           verticalSumMaxes
       real (kind=RKIND), dimension(kMaxVariables) :: sumSquares, reductions, sums, mins, maxes
@@ -280,9 +272,6 @@ contains
       ! package flags
       logical, pointer :: frazilIcePkgActive, landIceFluxesPkgActive
       logical, pointer :: thicknessFilterActive
-
-      logical, pointer :: config_AM_globalStats_text_file
-      character (len=StrKIND), pointer :: config_AM_globalStats_directory
 
       real (kind=RKIND), dimension(:), allocatable :: restoringSaltFlux
 
@@ -339,7 +328,6 @@ contains
          call mpas_pool_get_subpool(statePool, 'tracers', tracersPool)
          call mpas_pool_get_subpool(block % structs, 'mesh', meshPool)
          call mpas_pool_get_subpool(block % structs, 'scratch', scratchPool)
-         call mpas_pool_get_subpool(block % structs, 'diagnostics', diagnosticsPool)
          call mpas_pool_get_subpool(block % structs, 'globalStatsAM', globalStatsAMPool)
          call mpas_pool_get_subpool(block % structs, 'forcing', forcingPool)
 
@@ -365,24 +353,10 @@ contains
             call mpas_pool_get_array(statePool, 'highFreqThickness', highFreqThickness, 1)
          end if
 
-         call mpas_pool_get_array(diagnosticsPool, 'density', density)
-         call mpas_pool_get_array(diagnosticsPool, 'montgomeryPotential', montgomeryPotential)
-         call mpas_pool_get_array(diagnosticsPool, 'pressure', pressure)
-         call mpas_pool_get_array(diagnosticsPool, 'relativeVorticity', relativeVorticity)
-         call mpas_pool_get_array(diagnosticsPool, 'normalizedRelativeVorticityEdge', normalizedRelativeVorticityEdge)
-         call mpas_pool_get_array(diagnosticsPool, 'normalizedPlanetaryVorticityEdge', normalizedPlanetaryVorticityEdge)
-         call mpas_pool_get_array(diagnosticsPool, 'vertAleTransportTop', vertAleTransportTop)
-         call mpas_pool_get_array(diagnosticsPool, 'vertVelocityTop', vertVelocityTop)
-         call mpas_pool_get_array(diagnosticsPool, 'tangentialVelocity', tangentialVelocity)
-         call mpas_pool_get_array(diagnosticsPool, 'layerThicknessEdge', layerThicknessEdge)
-         call mpas_pool_get_array(diagnosticsPool, 'kineticEnergyCell', kineticEnergyCell)
-         call mpas_pool_get_array(diagnosticsPool, 'xtime', xtime)
-         call mpas_pool_get_array(diagnosticsPool, 'simulationStartTime',simulationStartTime)
-         call mpas_pool_get_array(diagnosticsPool, 'daysSinceStartOfSim',daysSinceStartOfSim)
-
          call mpas_pool_get_array(forcingPool, 'evaporationFlux', evaporationFlux)
          call mpas_pool_get_array(forcingPool, 'snowFlux', snowFlux)
          call mpas_pool_get_array(forcingPool, 'seaIceFreshWaterFlux', seaIceFreshWaterFlux)
+         call mpas_pool_get_array(forcingPool, 'icebergFreshWaterFlux', icebergFreshWaterFlux)
          call mpas_pool_get_array(forcingPool, 'riverRunoffFlux', riverRunoffFlux)
          call mpas_pool_get_array(forcingPool, 'iceRunoffFlux', iceRunoffFlux)
          call mpas_pool_get_array(forcingPool, 'rainFlux', rainFlux)
@@ -433,7 +407,7 @@ contains
          variableIndex = variableIndex + 1
          call ocn_compute_field_volume_weighted_local_stats_max_level(dminfo, nVertLevels, nEdgesSolve, &
                               maxLevelEdgeTop(1:nEdgesSolve), areaEdge(1:nEdgesSolve), &
-                              layerThicknessEdge(:,1:nEdgesSolve), &
+                              layerThickEdge(:,1:nEdgesSolve), &
                               normalVelocity(:,1:nEdgesSolve), sums_tmp(variableIndex), &
                               sumSquares_tmp(variableIndex), mins_tmp(variableIndex), &
                               maxes_tmp(variableIndex), &
@@ -450,7 +424,7 @@ contains
          variableIndex = variableIndex + 1
          call ocn_compute_field_volume_weighted_local_stats_max_level(dminfo, nVertLevels, nEdgesSolve, &
                               maxLevelEdgeTop(1:nEdgesSolve), areaEdge(1:nEdgesSolve), &
-                              layerThicknessEdge(:,1:nEdgesSolve), &
+                              layerThickEdge(:,1:nEdgesSolve), &
                               tangentialVelocity(:,1:nEdgesSolve), &
                               sums_tmp(variableIndex), sumSquares_tmp(variableIndex), &
                               mins_tmp(variableIndex), maxes_tmp(variableIndex), &
@@ -467,7 +441,7 @@ contains
          variableIndex = variableIndex + 1
          call ocn_compute_field_area_weighted_local_stats_max_level(dminfo, nVertLevels, nEdgesSolve, &
                             maxLevelEdgeTop(1:nEdgesSolve), areaEdge(1:nEdgesSolve), &
-                            layerThicknessEdge(:,1:nEdgesSolve), sums_tmp(variableIndex), &
+                            layerThickEdge(:,1:nEdgesSolve), sums_tmp(variableIndex), &
                             sumSquares_tmp(variableIndex), mins_tmp(variableIndex), &
                             maxes_tmp(variableIndex), verticalSumMins_tmp(variableIndex), &
                             verticalSumMaxes_tmp(variableIndex))
@@ -533,12 +507,12 @@ contains
 
          ! normalizedAbsoluteVorticity
          allocate(normalizedAbsoluteVorticity(nVertLevels,nEdgesSolve))
-         normalizedAbsoluteVorticity(:,:) = normalizedRelativeVorticityEdge(:,1:nEdgesSolve) &
-  + normalizedPlanetaryVorticityEdge(:,1:nEdgesSolve)
+         normalizedAbsoluteVorticity(:,:) = normRelVortEdge(:,1:nEdgesSolve) &
+  + normPlanetVortEdge(:,1:nEdgesSolve)
          variableIndex = variableIndex + 1
          call ocn_compute_field_volume_weighted_local_stats_max_level(dminfo, nVertLevels, nEdgesSolve, &
                               maxLevelEdgeTop(1:nEdgesSolve), areaEdge(1:nEdgesSolve), &
-                              layerThicknessEdge(:,1:nEdgesSolve), &
+                              layerThickEdge(:,1:nEdgesSolve), &
                               normalizedAbsoluteVorticity(:,1:nEdgesSolve), &
                               sums_tmp(variableIndex), sumSquares_tmp(variableIndex), &
                               mins_tmp(variableIndex), maxes_tmp(variableIndex), &
@@ -815,6 +789,28 @@ contains
             call ocn_compute_field_area_weighted_local_stats_surface(dminfo, nCellsSolve, &
                          areaCell(1:nCellsSolve), &
                          seaIceFreshWaterFlux(1:nCellsSolve), sums_tmp(variableIndex), &
+                         sumSquares_tmp(variableIndex), mins_tmp(variableIndex), &
+                         maxes_tmp(variableIndex))
+         else
+            sums_tmp(variableIndex) = 0.0_RKIND
+            sumSquares_tmp(variableIndex) = 0.0_RKIND
+            mins_tmp(variableIndex) = 0.0_RKIND
+            maxes_tmp(variableIndex) = 0.0_RKIND
+         end if
+         sums(variableIndex) = sums(variableIndex) + sums_tmp(variableIndex)
+         sumSquares(variableIndex) = sumSquares(variableIndex) + sumSquares_tmp(variableIndex)
+         mins(variableIndex) = min(mins(variableIndex), mins_tmp(variableIndex))
+         maxes(variableIndex) = max(maxes(variableIndex), maxes_tmp(variableIndex))
+         verticalSumMins(variableIndex) = mins(variableIndex)
+         verticalSumMaxes(variableIndex) = maxes(variableIndex)
+
+
+         ! icebergFreshWaterFlux
+         variableIndex = variableIndex + 1
+         if ( associated(icebergFreshWaterFlux) ) then
+            call ocn_compute_field_area_weighted_local_stats_surface(dminfo, nCellsSolve, &
+                         areaCell(1:nCellsSolve), &
+                         icebergFreshWaterFlux(1:nCellsSolve), sums_tmp(variableIndex), &
                          sumSquares_tmp(variableIndex), mins_tmp(variableIndex), &
                          maxes_tmp(variableIndex))
          else
@@ -1251,6 +1247,14 @@ contains
       ! continue accumulating fresh water inputs
       netFreshwaterInput = netFreshwaterInput + sums(variableIndex) * dt/rho_sw
 
+      ! icebergFreshWaterFlux
+      variableIndex = variableIndex + 1
+      averages(variableIndex) = sums(variableIndex)/(areaCellGlobal)
+      rms(variableIndex) = sqrt(sumSquares(variableIndex)/(areaCellGlobal))
+
+      ! continue accumulating fresh water inputs
+      netFreshwaterInput = netFreshwaterInput + sums(variableIndex) * dt/rho_sw
+
       ! riverRunoffFlux
       variableIndex = variableIndex + 1
       averages(variableIndex) = sums(variableIndex)/(areaCellGlobal)
@@ -1284,7 +1288,7 @@ contains
 
       ! landIceFreshwaterFlux
       variableIndex = variableIndex + 1
-      if (associated(landIceFreshwaterFlux)) then
+      if (associated(landIceFreshwaterFlux) .and. landIceFloatingAreaSum > 0.0_RKIND) then
          averages(variableIndex) = sums(variableIndex)/(landIceFloatingAreaSum)
          rms(variableIndex) = sqrt(sumSquares(variableIndex)/(landIceFloatingAreaSum))
       else
@@ -1297,7 +1301,7 @@ contains
 
       ! accumulatedLandIceMass
       variableIndex = variableIndex + 1
-      if (associated(accumulatedLandIceMass)) then
+      if (associated(accumulatedLandIceMass) .and. landIceFloatingAreaSum > 0.0_RKIND) then
          averages(variableIndex) = sums(variableIndex)/(landIceFloatingAreaSum)
          rms(variableIndex) = sqrt(sumSquares(variableIndex)/(landIceFloatingAreaSum))
       else
@@ -1307,7 +1311,7 @@ contains
 
       ! accumulatedLandIceHeat
       variableIndex = variableIndex + 1
-      if (associated(accumulatedLandIceHeat)) then
+      if (associated(accumulatedLandIceHeat) .and. landIceFloatingAreaSum > 0.0_RKIND) then
          averages(variableIndex) = sums(variableIndex)/(landIceFloatingAreaSum)
          rms(variableIndex) = sqrt(sumSquares(variableIndex)/(landIceFloatingAreaSum))
       else
@@ -1317,7 +1321,7 @@ contains
 
       ! accumulatedLandIceFrazilMass
       variableIndex = variableIndex + 1
-      if (landIceFluxesPkgActive .and. frazilIcePkgActive) then
+      if (landIceFluxesPkgActive .and. frazilIcePkgActive .and. landIceFloatingAreaSum > 0.0_RKIND) then
          averages(variableIndex) = sums(variableIndex)/(landIceFloatingAreaSum)
          rms(variableIndex) = sqrt(sumSquares(variableIndex)/(landIceFloatingAreaSum))
       else
@@ -1337,12 +1341,7 @@ contains
       maxGlobalStats(1:nVariables) =  maxes(1:nVariables)
       sumGlobalStats(1:nVariables) =  sums(1:nVariables)
 
-      call mpas_pool_get_config(domain % configs, 'config_AM_globalStats_text_file', config_AM_globalStats_text_file)
-      call mpas_pool_get_config(domain % configs, 'config_AM_globalStats_directory', config_AM_globalStats_directory)
       if (config_AM_globalStats_text_file) then
-
-         call mpas_pool_get_subpool(domain % blocklist % structs, 'diagnostics', diagnosticsPool)
-         call mpas_pool_get_array(diagnosticsPool, 'xtime', xtime)
 
          ! write out the data to files
          if (dminfo % my_proc_id == IO_NODE) then

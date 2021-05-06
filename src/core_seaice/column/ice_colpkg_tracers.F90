@@ -34,6 +34,10 @@
          nt_apnd  , & ! melt pond area fraction
          nt_hpnd  , & ! melt pond depth
          nt_ipnd  , & ! melt pond refrozen lid thickness
+         nt_smice , & ! mass of ice in snow
+         nt_smliq , & ! mass of liquid water in snow
+         nt_rhos  , & ! effective snow density (compaction)
+         nt_rsnw  , & ! effective snow grain radius
          nt_aero  , & ! starting index for aerosols in ice
          nt_bgc_Nit,   & ! nutrients  
          nt_bgc_Am,    & ! 
@@ -54,6 +58,8 @@
          tr_pond_cesm, & ! if .true., use cesm pond tracer
          tr_pond_lvl , & ! if .true., use level-ice pond tracer
          tr_pond_topo, & ! if .true., use explicit topography-based ponds
+         tr_snow     , & ! if .true., use snow tracers (ice, liquid water mass)
+         tr_rsnw     , & ! if .true., use dynamic snow grain radius tracer
          tr_aero     , & ! if .true., use aerosol tracers
          tr_brine        ! if .true., brine height differs from ice thickness
 
@@ -158,9 +164,10 @@
                                          atrcrn,    aicen,          &
                                          vicen,     vsnon,          &
                                          trcr_base, n_trcr_strata,  &
-                                         nt_strata, trcrn)
+                                         nt_strata, trcrn,          &
+                                         Tf)
 
-      use ice_constants_colpkg, only: c0, c1, puny, Tocnfrz
+      use ice_constants_colpkg, only: c0, c1, puny
 
       integer (kind=int_kind), intent(in) :: &
          ntrcr                 ! number of tracers in use
@@ -182,7 +189,8 @@
       real (kind=dbl_kind), intent(in) :: &
          aicen , & ! concentration of ice
          vicen , & ! volume per unit area of ice          (m)
-         vsnon     ! volume per unit area of snow         (m)
+         vsnon , & ! volume per unit area of snow         (m)
+         Tf        ! ocean freezing temperature           (Celsius)
 
       real (kind=dbl_kind), dimension (ntrcr), intent(out) :: &
          trcrn     ! ice tracers
@@ -215,7 +223,7 @@
                trcrn(it) = atrcrn(it) / aicen
             else
                trcrn(it) = c0
-               if (it == nt_Tsfc) trcrn(it) = Tocnfrz  ! surface temperature
+               if (it == nt_Tsfc) trcrn(it) = Tf      ! surface temperature
             endif
 
          else

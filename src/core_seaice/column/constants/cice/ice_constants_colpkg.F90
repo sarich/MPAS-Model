@@ -26,6 +26,7 @@
          cp_air    = 1005.0_dbl_kind  ,&! specific heat of air (J/kg/K)
          ! (Briegleb JGR 97 11475-11485  July 1992)
          emissivity= 0.95_dbl_kind    ,&! emissivity of snow and ice
+!echmod         emissivity= 0.985_dbl_kind    ,&! emissivity of snow and ice
          cp_ice    = 2106._dbl_kind   ,&! specific heat of fresh ice (J/kg/K)
          cp_ocn    = 4218._dbl_kind   ,&! specific heat of ocn    (J/kg/K)
                                         ! freshwater value needed for enthalpy
@@ -34,8 +35,9 @@
          albocn    = 0.06_dbl_kind    ,&! ocean albedo
          gravit    = 9.80616_dbl_kind ,&! gravitational acceleration (m/s^2)
          viscosity_dyn = 1.79e-3_dbl_kind, & ! dynamic viscosity of brine (kg/m/s)
-         Tocnfrz   = -1.8_dbl_kind    ,&! freezing temp of seawater (C),
-                                        ! used as Tsfcn for open water
+         Tocnfrz   = -1.8_dbl_kind    ,&! freezing temp of seawater (C), used 
+                                        ! as Tsfcn for open water only when 
+                                        ! tfrz_option is 'minus1p8' or null
          rhofresh  = 1000.0_dbl_kind  ,&! density of fresh water (kg/m^3)
          zvir      = 0.606_dbl_kind   ,&! rh2o/rair - 1.0
          vonkar    = 0.4_dbl_kind     ,&! von Karman constant
@@ -72,11 +74,15 @@
          ksno   = 0.30_dbl_kind  ,&! thermal conductivity of snow  (W/m/deg)
          zref   = 10._dbl_kind   ,&! reference height for stability (m)
          hs_min = 1.e-4_dbl_kind ,&! min snow thickness for computing zTsn (m)
-         snowpatch = 0.02_dbl_kind ! parameter for fractional snow area (m)
+         snowpatch = 0.02_dbl_kind, & ! parameter for fractional snow area (m)
+
+         ! biogeochemistry
+         sk_l = 0.03_dbl_kind      ! (m) skeletal layer thickness
 
       integer (kind=int_kind), parameter, public :: & 
-         nspint = 3                ! number of solar spectral intervals
-                    
+         nspint = 3              ,& ! number of solar spectral intervals
+         nspint_5bd = 5            ! number of solar spectral intervals used in SNICAR
+
       ! weights for albedos 
       ! 4 Jan 2007 BPB  Following are appropriate for complete cloud
       ! in a summer polar atmosphere with 1.5m bare sea ice surface:
@@ -107,6 +113,12 @@
       real(kind=dbl_kind),public :: eccf   ! earth orbit eccentricity factor
       logical(kind=log_kind),public :: log_print ! Flags print of status/error
     
+      ! snow parameters
+      real (kind=dbl_kind), parameter, public :: &
+         snwlvlfac =   0.3_dbl_kind, & ! 30% rule: fractional increase in snow depth
+                                       ! over ridged ice, compared with level ice
+         rhosmin   = 100.0_dbl_kind    ! minimum snow density (kg/m^3)
+
       !-----------------------------------------------------------------
       ! numbers used in column package
       !-----------------------------------------------------------------

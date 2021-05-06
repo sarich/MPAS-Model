@@ -44,33 +44,177 @@ contains
 !-----------------------------------------------------------------------
 
   subroutine seaice_init_velocity_solver_wachspress(&
-       mesh, &
-       velocity_variational, &
-       boundary, &
+       nCells, &
+       maxEdges, &
+       nEdgesOnCell, &
+       xLocal, &
+       yLocal, &
        rotateCartesianGrid, &
        includeMetricTerms, &
+       onASphere, &
        integrationType, &
-       integrationOrder)!{{{
+       integrationOrder, &
+       sphereRadius, &
+       basisGradientU, &
+       basisGradientV, &
+       basisIntegralsU, &
+       basisIntegralsV, &
+       basisIntegralsMetric)!{{{
 
     use mpas_timer
 
-    use seaice_mesh, only: &
-         seaice_cell_vertices_at_vertex
-
     use seaice_velocity_solver_variational_shared, only: &
-         seaice_calc_local_coords, &
-         seaice_calc_variational_metric_terms
+         seaice_calc_local_coords
 
-    type(MPAS_pool_type), pointer, intent(in) :: &
-         mesh !< Input:
+    integer, intent(in) :: &
+         nCells, & !< Input:
+         maxEdges  !< Input:
 
-    type(MPAS_pool_type), pointer :: &
-         velocity_variational, & !< Input/Output:
-         boundary                !< Input/Output:
+    integer, dimension(:), intent(in) :: &
+         nEdgesOnCell !< Input:
+
+    real(kind=RKIND), dimension(:,:), intent(in) :: &
+         xLocal, & !< Input:
+         yLocal    !< Input:
 
     logical, intent(in) :: &
          rotateCartesianGrid, & !< Input:
-         includeMetricTerms     !< Input:
+         includeMetricTerms, &  !< Input:
+         onASphere              !< Input:
+
+    character(len=strKIND), intent(in) :: &
+         integrationType !< Input:
+
+    integer, intent(in) :: &
+         integrationOrder !< Input:
+
+    real(kind=RKIND), intent(in) :: &
+         sphereRadius !< Input:
+
+    real(kind=RKIND), dimension(:,:,:), intent(out) :: &
+         basisGradientU, &    !< Output:
+         basisGradientV, &    !< Output:
+         basisIntegralsU, &   !< Output:
+         basisIntegralsV, &   !< Output:
+         basisIntegralsMetric !< Output:
+
+    real(kind=RKIND), dimension(:,:), allocatable :: &
+         wachspressA, &
+         wachspressB
+
+    real(kind=RKIND), dimension(:,:,:), allocatable :: &
+         wachspressKappa
+
+    call mpas_timer_start("Velocity solver Wachpress init")
+
+    allocate(wachspressKappa(maxEdges,maxEdges,nCells))
+    allocate(wachspressA(maxEdges,nCells))
+    allocate(wachspressB(maxEdges,nCells))
+
+    call mpas_timer_start("wachpress calc_coefficients")
+    call calc_wachspress_coefficients(&
+         wachspressKappa, &
+         wachspressA, &
+         wachspressB, &
+         nCells, &
+         nEdgesOnCell, &
+         xLocal, &
+         yLocal)
+    call mpas_timer_stop("wachpress calc_coefficients")
+
+    call mpas_timer_start("wachpress calc_derivatives")
+    call calculate_wachspress_derivatives(&
+         basisGradientU, &
+         basisGradientV, &
+         nCells, &
+         maxEdges, &
+         nEdgesOnCell, &
+         xLocal, &
+         yLocal, &
+         wachspressA, &
+         wachspressB, &
+         wachspressKappa)
+    call mpas_timer_stop("wachpress calc_derivatives")
+
+    call mpas_timer_start("wachpress integrate")
+    call integrate_wachspress(&
+         basisIntegralsU, &
+         basisIntegralsV, &
+         basisIntegralsMetric, &
+         nCells, &
+         nEdgesOnCell, &
+         xLocal, &
+         yLocal, &
+         wachspressA, &
+         wachspressB, &
+         wachspressKappa, &
+         integrationType, &
+         integrationOrder)
+    call mpas_timer_stop("wachpress integrate")
+
+    deallocate(wachspressKappa)
+    deallocate(wachspressA)
+    deallocate(wachspressB)
+
+    call mpas_timer_stop("Velocity solver Wachpress init")
+
+  end subroutine seaice_init_velocity_solver_wachspress!}}}
+
+!-----------------------------------------------------------------------
+! Integration
+!-----------------------------------------------------------------------
+
+!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+!
+!  integrate_wachspress
+!
+!> \brief
+!> \author Adrian K. Turner, LANL
+!> \date 2013-2014
+!> \details
+!>
+!
+!-----------------------------------------------------------------------
+
+  subroutine integrate_wachspress(&
+       basisIntegralsU, &
+       basisIntegralsV, &
+       basisIntegralsMetric, &
+       nCells, &
+       nEdgesOnCell, &
+       xLocal, &
+       yLocal, &
+       wachspressA, &
+       wachspressB, &
+       wachspressKappa, &
+       integrationType, &
+       integrationOrder)!{{{
+
+    ! basisIntegralsUV (iStressVertex,iVelocityVertex,iCell)
+    ! iCell         : cell integrals are performed on
+    ! iStressVertex : vertex number of Wachspress function
+    ! iVelocityVertex : vertex number of Wachspress derivative function
+    ! Sij
+
+    real(kind=RKIND), dimension(:,:,:), intent(out) :: &
+         basisIntegralsU, &   !< Output:
+         basisIntegralsV, &   !< Output:
+         basisIntegralsMetric !< Output:
+
+    integer, intent(in) :: &
+         nCells !< Input:
+
+    integer, dimension(:), intent(in) :: &
+         nEdgesOnCell !< Input:
+
+    real(kind=RKIND), dimension(:,:), intent(in) :: &
+         xLocal, &      !< Input:
+         yLocal, &      !< Input:
+         wachspressA, & !< Input:
+         wachspressB    !< Input:
+
+    real(kind=RKIND), dimension(:,:,:), intent(in) :: &
+         wachspressKappa !< Input:
 
     character(len=strKIND), intent(in) :: &
          integrationType !< Input:
@@ -80,116 +224,301 @@ contains
 
     integer :: &
          iCell, &
-         iVertex
+         iStressVertex, &
+         iVelocityVertex
 
-    integer, pointer :: &
-         nCells, &
-         maxEdges, i1, i2
+    integer :: &
+         nIntegrationPoints
 
-    integer, dimension(:), pointer :: &
-         nEdgesOnCell
+    real(kind=RKIND), dimension(:), allocatable :: &
+         integrationU, &
+         integrationV, &
+         integrationWeights
 
-    integer, dimension(:,:), pointer :: &
-         cellVerticesAtVertex
+    real(kind=RKIND) :: &
+         normalizationFactor
 
-    real(kind=RKIND), dimension(:), pointer :: &
-         tanLatVertexRotatedOverRadius
-
-    real(kind=RKIND), dimension(:,:), allocatable :: &
-         xLocal, &
-         yLocal
-
-    real(kind=RKIND), dimension(:,:), allocatable :: &
-         wachspressA, &
-         wachspressB
-
-    real(kind=RKIND), dimension(:,:,:), allocatable :: &
-         wachspressKappa
-
-    real(kind=RKIND), dimension(:,:,:), pointer :: &
-         basisGradientU, &
-         basisGradientV, &
-         basisIntegralsU, &
-         basisIntegralsV, &
-         basisIntegralsMetric
-
-    call mpas_timer_start("Velocity solver Wachpress init")
-
-    call MPAS_pool_get_dimension(mesh, "nCells", nCells)
-    call MPAS_pool_get_dimension(mesh, "maxEdges", maxEdges)
-
-    call MPAS_pool_get_array(mesh, "nEdgesOnCell", nEdgesOnCell)
-
-    call MPAS_pool_get_array(velocity_variational, "cellVerticesAtVertex", cellVerticesAtVertex)
-    call MPAS_pool_get_array(velocity_variational, "tanLatVertexRotatedOverRadius", tanLatVertexRotatedOverRadius)
-    call MPAS_pool_get_array(velocity_variational, "basisGradientU", basisGradientU)
-    call MPAS_pool_get_array(velocity_variational, "basisGradientV", basisGradientV)
-    call MPAS_pool_get_array(velocity_variational, "basisIntegralsU", basisIntegralsU)
-    call MPAS_pool_get_array(velocity_variational, "basisIntegralsV", basisIntegralsV)
-    call MPAS_pool_get_array(velocity_variational, "basisIntegralsMetric", basisIntegralsMetric)
-
-    allocate(xLocal(maxEdges,nCells))
-    allocate(yLocal(maxEdges,nCells))
-    allocate(wachspressKappa(maxEdges,maxEdges,nCells))
-    allocate(wachspressA(maxEdges,nCells))
-    allocate(wachspressB(maxEdges,nCells))
-
-    call seaice_calc_local_coords(&
-         mesh, &
-         xLocal, &
-         yLocal, &
-         rotateCartesianGrid)
-
-    call seaice_calc_variational_metric_terms(&
-         mesh, &
-         tanLatVertexRotatedOverRadius, &
-         rotateCartesianGrid, &
-         includeMetricTerms)
-
-    call calc_wachspress_coefficients(&
-         mesh, &
-         wachspressKappa, &
-         wachspressA, &
-         wachspressB, &
-         xLocal, &
-         yLocal)
-
-    call calculate_wachspress_derivatives(&
-         mesh, &
-         basisGradientU, &
-         basisGradientV, &
-         xLocal, &
-         yLocal, &
-         wachspressA, &
-         wachspressB, &
-         wachspressKappa)
-
-    call integrate_wachspress(&
-         mesh, &
-         basisIntegralsU, &
-         basisIntegralsV, &
-         basisIntegralsMetric, &
-         xLocal, &
-         yLocal, &
-         wachspressA, &
-         wachspressB, &
-         wachspressKappa, &
+    ! Quadrature rules
+    call get_integration_factors(&
          integrationType, &
-         integrationOrder)
+         integrationOrder, &
+         nIntegrationPoints, &
+         integrationU, &
+         integrationV, &
+         integrationWeights, &
+         normalizationFactor)
 
-    call seaice_cell_vertices_at_vertex(&
-         mesh, &
-         cellVerticesAtVertex)
+    !$omp parallel do default(shared) private(iStressVertex, iVelocityVertex)
+    do iCell = 1, nCells
 
-    deallocate(xLocal)
-    deallocate(yLocal)
-    deallocate(wachspressKappa)
-    deallocate(wachspressA)
-    deallocate(wachspressB)
+       do iVelocityVertex = 1, nEdgesOnCell(iCell)
 
-    call mpas_timer_stop("Velocity solver Wachpress init")
+          do iStressVertex = 1, nEdgesOnCell(iCell)
 
-  end subroutine seaice_init_velocity_solver_wachspress!}}}
+             basisIntegralsU(iStressVertex,iVelocityVertex,iCell)      = 0.0_RKIND
+             basisIntegralsV(iStressVertex,iVelocityVertex,iCell)      = 0.0_RKIND
+             basisIntegralsMetric(iStressVertex,iVelocityVertex,iCell) = 0.0_RKIND
+
+             call integrate_wachspress_polygon(&
+                  basisIntegralsU(iStressVertex,iVelocityVertex,iCell), &
+                  basisIntegralsV(iStressVertex,iVelocityVertex,iCell), &
+                  basisIntegralsMetric(iStressVertex,iVelocityVertex,iCell), &
+                  nEdgesOnCell(iCell), &
+                  iStressVertex, &
+                  iVelocityVertex, &
+                  xLocal(:,iCell), &
+                  yLocal(:,iCell), &
+                  wachspressA(:,iCell), &
+                  wachspressB(:,iCell), &
+                  wachspressKappa(:,:,iCell), &
+                  nIntegrationPoints, &
+                  integrationU, &
+                  integrationV, &
+                  integrationWeights, &
+                  normalizationFactor)
+
+          enddo ! jVertex
+
+       enddo ! iVertex
+
+    enddo ! iCell
+
+    deallocate(integrationU)
+    deallocate(integrationV)
+    deallocate(integrationWeights)
+
+  end subroutine integrate_wachspress!}}}
+
+!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+!
+!  integrate_wachspress_polygon
+!
+!> \brief
+!> \author Adrian K. Turner, LANL
+!> \date 2013-2014
+!> \details
+!>
+!
+!-----------------------------------------------------------------------
+
+  subroutine integrate_wachspress_polygon(&
+       basisIntegralsU, &
+       basisIntegralsV, &
+       basisIntegralsMetric, &
+       nEdgesOnCell, &
+       iStressVertex, &
+       iVelocityVertex, &
+       xLocal, &
+       yLocal, &
+       wachspressA, &
+       wachspressB, &
+       wachspressKappa, &
+       nIntegrationPoints, &
+       integrationU, &
+       integrationV, &
+       integrationWeights, &
+       normalizationFactor)!{{{
+
+    use seaice_velocity_solver_variational_shared, only: &
+         seaice_wrapped_index
+
+    real(kind=RKIND), intent(inout) :: &
+         basisIntegralsU, &   !< Input/Output:
+         basisIntegralsV, &   !< Input/Output:
+         basisIntegralsMetric !< Input/Output:
+
+    integer, intent(in) :: &
+         nEdgesOnCell, &  !< Input:
+         iStressVertex, & !< Input:
+         iVelocityVertex  !< Input:
+
+    real(kind=RKIND), dimension(:), intent(in) :: &
+         xLocal, & !< Input:
+         yLocal    !< Input:
+
+    real(kind=RKIND), dimension(:), intent(in) :: &
+         wachspressA, & !< Input:
+         wachspressB    !< Input:
+
+    real(kind=RKIND), dimension(:,:), intent(in) :: &
+         wachspressKappa !< Input:
+
+    integer, intent(in) :: &
+         nIntegrationPoints !< Input:
+
+    real(kind=RKIND), dimension(:), intent(in) :: &
+         integrationU, & !< Input:
+         integrationV, & !< Input:
+         integrationWeights !< Input:
+
+    real(kind=RKIND), intent(in) :: &
+         normalizationFactor !< Input:
+
+    integer, dimension(nEdgesOnCell) :: &
+         nEdgesOnCellSubset
+
+    integer, dimension(nEdgesOnCell,nEdgesOnCell) :: &
+         vertexIndexSubset
+
+    real(kind=RKIND) :: &
+         basisIntegralsSubTriangleTmp, &
+         basisIntegralsUSubTriangle, &
+         basisIntegralsVSubTriangle, &
+         basisIntegralsMetricSubTriangle
+
+    real(kind=RKIND), dimension(nIntegrationPoints) :: &
+         x, &
+         y, &
+         stressBasisFunction, &
+         velocityBasisFunction, &
+         velocityBasisDerivativeU, &
+         velocityBasisDerivativeV
+
+    real(kind=RKIND), dimension(2,2) :: &
+         mapping
+
+    real(kind=RKIND), dimension(nEdgesOnCell) :: &
+         jacobian
+
+    integer :: &
+         iIntegrationPoint, &
+         iSubTriangle, &
+         i1, &
+         i2
+
+    call wachspress_indexes(&
+         nEdgesOnCell, &
+         nEdgesOnCellSubset, &
+         vertexIndexSubset)
+
+    do iSubTriangle = 1, nEdgesOnCell
+
+       i1 = iSubTriangle
+       i2 = seaice_wrapped_index(iSubTriangle + 1, nEdgesOnCell)
+
+       call get_triangle_mapping(&
+            mapping, &
+            jacobian(iSubTriangle), &
+            1.0_RKIND, 0.0_RKIND, &
+            0.0_RKIND, 1.0_RKIND, &
+            xLocal(i1), yLocal(i1), &
+            xLocal(i2), yLocal(i2))
+
+       !in-lined use_triangle_mapping
+       do iIntegrationPoint = 1, nIntegrationPoints
+
+          x(iIntegrationPoint) = mapping(1,1) * integrationU(iIntegrationPoint) + &
+                                 mapping(1,2) * integrationV(iIntegrationPoint)
+          y(iIntegrationPoint) = mapping(2,1) * integrationU(iIntegrationPoint) + &
+                                 mapping(2,2) * integrationV(iIntegrationPoint)
+
+       enddo ! iIntegrationPoint
+
+       call wachspress_basis_function(&
+            nEdgesOnCell, iStressVertex, x, y, &
+            wachspressKappa, wachspressA, wachspressB, &
+            nEdgesOnCellSubset, vertexIndexSubset, &
+            stressBasisFunction)
+
+       call wachspress_basis_function(&
+            nEdgesOnCell, iVelocityVertex, x, y, &
+            wachspressKappa, wachspressA, wachspressB, &
+            nEdgesOnCellSubset, vertexIndexSubset, &
+            velocityBasisFunction)
+
+       call wachspress_basis_derivative(&
+            nEdgesOnCell, iVelocityVertex, x, y, &
+            wachspressKappa, wachspressA, wachspressB, &
+            nEdgesOnCellSubset, vertexIndexSubset, &
+            velocityBasisDerivativeU, &
+            velocityBasisDerivativeV)
+
+       basisIntegralsUSubTriangle      = 0.0_RKIND
+       basisIntegralsVSubTriangle      = 0.0_RKIND
+       basisIntegralsMetricSubTriangle = 0.0_RKIND
+
+       do iIntegrationPoint = 1, nIntegrationPoints
+
+          basisIntegralsSubTriangleTmp = &
+               jacobian(iSubTriangle) * &
+               integrationWeights(iIntegrationPoint) * &
+               stressBasisFunction(iIntegrationPoint)
+
+          basisIntegralsUSubTriangle = basisIntegralsUSubTriangle + &
+               basisIntegralsSubTriangleTmp * &
+               velocityBasisDerivativeU(iIntegrationPoint)
+
+          basisIntegralsVSubTriangle = basisIntegralsVSubTriangle + &
+               basisIntegralsSubTriangleTmp * &
+               velocityBasisDerivativeV(iIntegrationPoint)
+
+          basisIntegralsMetricSubTriangle = basisIntegralsMetricSubTriangle + &
+               basisIntegralsSubTriangleTmp * &
+               velocityBasisFunction(iIntegrationPoint)
+
+       enddo ! iIntegrationPoint
+
+       basisIntegralsU      = basisIntegralsU      + basisIntegralsUSubTriangle      / normalizationFactor
+       basisIntegralsV      = basisIntegralsV      + basisIntegralsVSubTriangle      / normalizationFactor
+       basisIntegralsMetric = basisIntegralsMetric + basisIntegralsMetricSubTriangle / normalizationFactor
+
+    enddo ! iSubTriangle
+
+  end subroutine integrate_wachspress_polygon!}}}
+
+!-----------------------------------------------------------------------
+! Remapping
+!-----------------------------------------------------------------------
+
+!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+!
+!  get_triangle_mapping
+!
+!> \brief
+!> \author Adrian K. Turner, LANL
+!> \date 2013-2014
+!> \details
+!>
+!
+!-----------------------------------------------------------------------
+
+  subroutine get_triangle_mapping(&
+       mapping, &
+       jacobian, &
+       x1, y1, &
+       x2, y2, &
+       u1, v1, &
+       u2, v2)!{{{
+
+    real(kind=RKIND), dimension(2,2), intent(out) :: &
+         mapping !< Output:
+
+    real(kind=RKIND), intent(out) :: &
+         jacobian !< Output:
+
+    real(kind=RKIND), intent(in) :: &
+         x1, & !< Input:
+         y1, & !< Input:
+         x2, & !< Input:
+         y2, & !< Input:
+         u1, & !< Input:
+         v1, & !< Input:
+         u2, & !< Input:
+         v2    !< Input:
+
+    mapping(1,1) = (u2*y1 - u1*y2) / (x2*y1 - x1*y2)
+    mapping(1,2) = (u1*x2 - u2*x1) / (y1*x2 - y2*x1)
+
+    mapping(2,1) = (v2*y1 - v1*y2) / (x2*y1 - x1*y2)
+    mapping(2,2) = (v1*x2 - v2*x1) / (y1*x2 - y2*x1)
+
+    jacobian = mapping(1,1) * mapping(2,2) - mapping(1,2) * mapping(2,1)
+
+  end subroutine get_triangle_mapping!}}}
+
+!-----------------------------------------------------------------------
+! Wachspress function
+!-----------------------------------------------------------------------
 
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 !
@@ -204,15 +533,13 @@ contains
 !-----------------------------------------------------------------------
 
   subroutine calc_wachspress_coefficients(&
-       mesh, &
        wachspressKappa, &
        wachspressA, &
        wachspressB, &
+       nCells, &
+       nEdgesOnCell, &
        xLocal, &
        yLocal)!{{{
-
-    type(MPAS_pool_type), pointer, intent(in) :: &
-         mesh !< Input:
 
     real(kind=RKIND), dimension(:,:,:), intent(out) :: &
          wachspressKappa !< Output:
@@ -220,6 +547,12 @@ contains
     real(kind=RKIND), dimension(:,:), intent(out) :: &
          wachspressA, & !< Output:
          wachspressB    !< Output:
+
+    integer, intent(in) :: &
+         nCells !< Input:
+
+    integer, dimension(:), intent(in) :: &
+         nEdgesOnCell !< Input:
 
     real(kind=RKIND), dimension(:,:), intent(in) :: &
          xLocal, & !< Input:
@@ -232,17 +565,6 @@ contains
          i1, &
          i2, &
          jVertex
-
-    integer, pointer :: &
-         nCells
-
-    integer, dimension(:), pointer :: &
-         nEdgesOnCell
-
-    ! init variables
-    call MPAS_pool_get_dimension(mesh, "nCells", nCells)
-
-    call MPAS_pool_get_array(mesh, "nEdgesOnCell", nEdgesOnCell)
 
     ! loop over cells
     do iCell = 1, nCells
@@ -312,13 +634,13 @@ contains
          seaice_wrapped_index
 
     integer, intent(in) :: &
-         nEdgesOnCell
+         nEdgesOnCell !< Input:
 
     integer, dimension(:), intent(out) :: &
-         nEdgesOnCellSubset
+         nEdgesOnCellSubset !< Output:
 
     integer, dimension(:,:), intent(out) :: &
-         vertexIndexSubset
+         vertexIndexSubset !< Output:
 
     integer :: &
          jVertex, &
@@ -388,27 +710,23 @@ contains
          wachspressB    !< Input:
 
     integer, dimension(:), intent(in) :: &
-         nEdgesOnCellSubset
+         nEdgesOnCellSubset !< Input:
 
     integer, dimension(:,:), intent(in) :: &
-         vertexIndexSubset
+         vertexIndexSubset !< Input:
 
     real(kind=RKIND), dimension(:), intent(out) :: &
          wachpress !< Output:
 
-    real(kind=RKIND), dimension(:,:), allocatable :: &
+    real(kind=RKIND), dimension(size(x),nEdgesOnCell) :: &
          numerator
 
-    real(kind=RKIND), dimension(:), allocatable :: &
+    real(kind=RKIND), dimension(size(x)) :: &
          denominator, &
          edgeEquation
 
     integer :: &
          jVertex
-
-    allocate(denominator(size(x)))
-    allocate(numerator(size(x),nEdgesOnCell))
-    allocate(edgeEquation(size(x)))
 
     ! sum over numerators to get denominator
     denominator(:) = 0.0_RKIND
@@ -427,10 +745,6 @@ contains
     enddo ! jVertex
 
     wachpress(:) = numerator(:,iVertex) / denominator(:)
-
-    deallocate(denominator)
-    deallocate(numerator)
-    deallocate(edgeEquation)
 
   end subroutine wachspress_basis_function!}}}
 
@@ -475,38 +789,32 @@ contains
          wachspressB    !< Input:
 
     integer, dimension(:), intent(in) :: &
-         nEdgesOnCellSubset
+         nEdgesOnCellSubset !< Input:
 
     integer, dimension(:,:), intent(in) :: &
-         vertexIndexSubset
+         vertexIndexSubset !< Input:
 
     real(kind=RKIND), dimension(:), intent(out) :: &
          wachspressU, & !< Output:
          wachspressV !< Output:
 
-    real(kind=RKIND), dimension(:,:,:), allocatable :: &
+    real(kind=RKIND), dimension(size(x),2,nEdgesOnCell) :: &
          derivative
 
-    real(kind=RKIND), dimension(:,:), allocatable :: &
-         numerator, &
+    real(kind=RKIND), dimension(size(x),nEdgesOnCell) :: &
+         numerator
+
+    real(kind=RKIND), dimension(size(x),2) :: &
          sum_of_derivatives, &
          sum_of_products, &
          product
 
-    real(kind=RKIND), dimension(:), allocatable :: &
+    real(kind=RKIND), dimension(size(x)) :: &
          denominator, &
          edgeEquation
 
     integer :: &
          jVertex
-
-    allocate(denominator(size(x)))
-    allocate(sum_of_derivatives(size(x),2))
-    allocate(numerator(size(x),nEdgesOnCell))
-    allocate(derivative(size(x),2,nEdgesOnCell))
-    allocate(sum_of_products(size(x),2))
-    allocate(product(size(x),2))
-    allocate(edgeEquation(size(x)))
 
     ! sum over numerators to get denominator
     denominator(:) = 0.0_RKIND
@@ -538,14 +846,6 @@ contains
          (numerator(:,iVertex) / denominator(:)**2) * sum_of_derivatives(:,1)
     wachspressV(:) = derivative(:,2,iVertex) / denominator(:) - &
          (numerator(:,iVertex) / denominator(:)**2) * sum_of_derivatives(:,2)
-
-    deallocate(denominator)
-    deallocate(sum_of_derivatives)
-    deallocate(numerator)
-    deallocate(derivative)
-    deallocate(sum_of_products)
-    deallocate(product)
-    deallocate(edgeEquation)
 
   end subroutine wachspress_basis_derivative!}}}
 
@@ -592,10 +892,10 @@ contains
          wachspressB    !< Input:
 
     integer, dimension(:), intent(in) :: &
-         nEdgesOnCellSubset
+         nEdgesOnCellSubset !< Input:
 
     integer, dimension(:,:), intent(in) :: &
-         vertexIndexSubset
+         vertexIndexSubset !< Input:
 
     real(kind=RKIND), dimension(:), intent(inout) :: &
          edgeEquation
@@ -669,20 +969,20 @@ contains
          wachspressB    !< Input:
 
     integer, dimension(:), intent(in) :: &
-         nEdgesOnCellSubset
+         nEdgesOnCellSubset !< Input:
 
     integer, dimension(:,:), intent(in) :: &
-         vertexIndexSubset
+         vertexIndexSubset !< Input:
 
     real(kind=RKIND), dimension(:,:), intent(out) :: &
          derivative !< Output:
 
     real(kind=RKIND), dimension(:,:), intent(inout) :: &
-         sum_of_products, &
-         product
+         sum_of_products, & !< Input/Output:
+         product            !< Input/Output:
 
     real(kind=RKIND), dimension(:), intent(inout) :: &
-         edgeEquation
+         edgeEquation !< Input/Output:
 
     integer :: &
          kVertex, &
@@ -781,16 +1081,16 @@ contains
 !-----------------------------------------------------------------------
 
   subroutine calculate_wachspress_derivatives(&
-       mesh, &
        basisGradientU, &
        basisGradientV, &
+       nCells, &
+       maxEdges, &
+       nEdgesOnCell, &
        xLocal, &
        yLocal, &
        wachspressA, &
        wachspressB, &
        wachspressKappa)!{{{
-
-    use mpas_timer
 
     use seaice_velocity_solver_variational_shared, only: &
          seaice_wrapped_index
@@ -800,12 +1100,16 @@ contains
     ! iVertexOnCell : The vertex basis function the gradient is calculated from
     ! jVertexOnCell : The vertex location the gradients are calculated at
 
-    type(MPAS_pool_type), pointer, intent(in) :: &
-         mesh !< Input:
-
     real(kind=RKIND), dimension(:,:,:), intent(out) :: &
          basisGradientU, & !< Output:
          basisGradientV    !< Output:
+
+    integer, intent(in) :: &
+         nCells, & !< Input:
+         maxEdges  !< Input:
+
+    integer, dimension(:), intent(in) :: &
+         nEdgesOnCell !< Input:
 
     real(kind=RKIND), dimension(:,:), intent(in) :: &
          wachspressA, & !< Input:
@@ -821,16 +1125,6 @@ contains
          iBasisVertex, &
          iGradientVertex
 
-    integer, pointer :: &
-         nCells, &
-         maxEdges
-
-    integer, dimension(:), pointer :: &
-         nEdgesOnCell
-
-    integer, dimension(:,:), pointer :: &
-         verticesOnCell
-
     integer, dimension(:), allocatable :: &
          nEdgesOnCellSubset
 
@@ -839,13 +1133,6 @@ contains
 
     real(kind=RKIND), dimension(:), allocatable :: &
          x, y, derivativeU, derivativeV
-
-    ! init variables
-    call MPAS_pool_get_dimension(mesh, "nCells", nCells)
-    call MPAS_pool_get_dimension(mesh, "maxEdges", maxEdges)
-
-    call MPAS_pool_get_array(mesh, "nEdgesOnCell", nEdgesOnCell)
-    call MPAS_pool_get_array(mesh, "verticesOnCell", verticesOnCell)
 
     allocate(x(maxEdges))
     allocate(y(maxEdges))
@@ -918,216 +1205,9 @@ contains
 
   end subroutine calculate_wachspress_derivatives!}}}
 
-!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-!
-!  get_triangle_mapping
-!
-!> \brief
-!> \author Adrian K. Turner, LANL
-!> \date 2013-2014
-!> \details
-!>
-!
 !-----------------------------------------------------------------------
-
-  subroutine get_triangle_mapping(&
-       mapping, &
-       jacobian, &
-       x1, y1, &
-       x2, y2, &
-       u1, v1, &
-       u2, v2)!{{{
-
-    real(kind=RKIND), dimension(2,2), intent(out) :: &
-         mapping !< Output:
-
-    real(kind=RKIND), intent(out) :: &
-         jacobian !< Output:
-
-    real(kind=RKIND), intent(in) :: &
-         x1, & !< Input:
-         y1, & !< Input:
-         x2, & !< Input:
-         y2, & !< Input:
-         u1, & !< Input:
-         v1, & !< Input:
-         u2, & !< Input:
-         v2    !< Input:
-
-    mapping(1,1) = (u2*y1 - u1*y2) / (x2*y1 - x1*y2)
-    mapping(1,2) = (u1*x2 - u2*x1) / (y1*x2 - y2*x1)
-
-    mapping(2,1) = (v2*y1 - v1*y2) / (x2*y1 - x1*y2)
-    mapping(2,2) = (v1*x2 - v2*x1) / (y1*x2 - y2*x1)
-
-    jacobian = mapping(1,1) * mapping(2,2) - mapping(1,2) * mapping(2,1)
-
-  end subroutine get_triangle_mapping!}}}
-
-!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-!
-!  use_triangle_mapping
-!
-!> \brief
-!> \author Adrian K. Turner, LANL
-!> \date 2013-2014
-!> \details
-!>
-!
+! Integration factors
 !-----------------------------------------------------------------------
-
-  subroutine use_triangle_mapping(&
-       u, v, &
-       x, y, &
-       mapping)!{{{
-
-    real(kind=RKIND), intent(out) :: &
-         u, v !< Output:
-
-    real(kind=RKIND), intent(in) :: &
-         x, y !< Input:
-
-    real(kind=RKIND), dimension(2,2), intent(in) :: &
-         mapping !< Input:
-
-    u = mapping(1,1) * x + mapping(1,2) * y
-    v = mapping(2,1) * x + mapping(2,2) * y
-
-  end subroutine use_triangle_mapping!}}}
-
-!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-!
-!  integrate_wachspress
-!
-!> \brief
-!> \author Adrian K. Turner, LANL
-!> \date 2013-2014
-!> \details
-!>
-!
-!-----------------------------------------------------------------------
-
-  subroutine integrate_wachspress(&
-       mesh, &
-       basisIntegralsU, &
-       basisIntegralsV, &
-       basisIntegralsMetric, &
-       xLocal, &
-       yLocal, &
-       wachspressA, &
-       wachspressB, &
-       wachspressKappa, &
-       integrationType, &
-       integrationOrder)!{{{
-
-    use mpas_timer
-
-    ! basisIntegralsUV (iStressVertex,iVelocityVertex,iCell)
-    ! iCell         : cell integrals are performed on
-    ! iStressVertex : vertex number of Wachspress function
-    ! iVelocityVertex : vertex number of Wachspress derivative function
-    ! Sij
-
-    type(MPAS_pool_type), pointer, intent(in) :: &
-         mesh !< Input:
-
-    real(kind=RKIND), dimension(:,:,:), intent(out) :: &
-         basisIntegralsU, &   !< Output:
-         basisIntegralsV, &   !< Output:
-         basisIntegralsMetric !< Output:
-
-    real(kind=RKIND), dimension(:,:), intent(in) :: &
-         xLocal, &      !< Input:
-         yLocal, &      !< Input:
-         wachspressA, & !< Input:
-         wachspressB    !< Input:
-
-    real(kind=RKIND), dimension(:,:,:), intent(in) :: &
-         wachspressKappa !< Input:
-
-    character(len=strKIND), intent(in) :: &
-         integrationType !< Input:
-
-    integer, intent(in) :: &
-         integrationOrder !< Input:
-
-    real(kind=RKIND) :: &
-         integration
-
-    integer :: &
-         iCell, &
-         iStressVertex, &
-         iVelocityVertex
-
-    integer, pointer :: &
-         nCells
-
-    integer, dimension(:), pointer :: &
-         nEdgesOnCell
-
-    integer :: &
-         nIntegrationPoints
-
-    real(kind=RKIND), dimension(:), allocatable :: &
-         integrationU, &
-         integrationV, &
-         integrationWeights
-
-    real(kind=RKIND) :: &
-         normalizationFactor
-
-    ! init variables
-    call MPAS_pool_get_dimension(mesh, "nCells", nCells)
-    call MPAS_pool_get_array(mesh, "nEdgesOnCell", nEdgesOnCell)
-
-    call get_integration_factors(&
-         integrationType, &
-         integrationOrder, &
-         nIntegrationPoints, &
-         integrationU, &
-         integrationV, &
-         integrationWeights, &
-         normalizationFactor)
-
-    do iCell = 1, nCells
-
-       do iStressVertex = 1, nEdgesOnCell(iCell)
-
-          do iVelocityVertex = 1, nEdgesOnCell(iCell)
-
-             basisIntegralsU(iStressVertex,iVelocityVertex,iCell)      = 0.0_RKIND
-             basisIntegralsV(iStressVertex,iVelocityVertex,iCell)      = 0.0_RKIND
-             basisIntegralsMetric(iStressVertex,iVelocityVertex,iCell) = 0.0_RKIND
-
-             call integrate_wachspress_polygon(&
-                  basisIntegralsU(iStressVertex,iVelocityVertex,iCell), &
-                  basisIntegralsV(iStressVertex,iVelocityVertex,iCell), &
-                  basisIntegralsMetric(iStressVertex,iVelocityVertex,iCell), &
-                  nEdgesOnCell(iCell), &
-                  iStressVertex, &
-                  iVelocityVertex, &
-                  xLocal(:,iCell), &
-                  yLocal(:,iCell), &
-                  wachspressA(:,iCell), &
-                  wachspressB(:,iCell), &
-                  wachspressKappa(:,:,iCell), &
-                  nIntegrationPoints, &
-                  integrationU, &
-                  integrationV, &
-                  integrationWeights, &
-                  normalizationFactor)
-
-          enddo ! jVertex
-
-       enddo ! iVertex
-
-    enddo ! iCell
-
-    deallocate(integrationU)
-    deallocate(integrationV)
-    deallocate(integrationWeights)
-
-  end subroutine integrate_wachspress!}}}
 
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 !
@@ -1141,7 +1221,14 @@ contains
 !
 !-----------------------------------------------------------------------
 
-  subroutine get_integration_factors(integrationType, integrationOrder, nIntegrationPoints, u, v, weights, normalizationFactor)
+  subroutine get_integration_factors(&
+       integrationType, &
+       integrationOrder, &
+       nIntegrationPoints, &
+       u, &
+       v, &
+       weights, &
+       normalizationFactor)
 
     character(len=strKIND), intent(in) :: &
          integrationType
@@ -1852,218 +1939,6 @@ contains
     end select
 
   end subroutine get_integration_factors_fekete
-
-!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-!
-!  integrate_wachspress_polygon
-!
-!> \brief
-!> \author Adrian K. Turner, LANL
-!> \date 2013-2014
-!> \details
-!>
-!
-!-----------------------------------------------------------------------
-
-  subroutine integrate_wachspress_polygon(&
-       basisIntegralsU, &
-       basisIntegralsV, &
-       basisIntegralsMetric, &
-       nEdgesOnCell, &
-       iStressVertex, &
-       iVelocityVertex, &
-       xLocal, &
-       yLocal, &
-       wachspressA, &
-       wachspressB, &
-       wachspressKappa, &
-       nIntegrationPoints, &
-       integrationU, &
-       integrationV, &
-       integrationWeights, &
-       normalizationFactor)!{{{
-
-    use seaice_constants, only: pii
-
-    use seaice_velocity_solver_variational_shared, only: &
-         seaice_wrapped_index
-
-    real(kind=RKIND), intent(inout) :: &
-         basisIntegralsU, &
-         basisIntegralsV, &
-         basisIntegralsMetric
-
-    integer, intent(in) :: &
-         nEdgesOnCell, &  !< Input:
-         iStressVertex, & !< Input:
-         iVelocityVertex  !< Input:
-
-    real(kind=RKIND), dimension(:), intent(in) :: &
-         xLocal, & !< Input:
-         yLocal    !< Input:
-
-    real(kind=RKIND), dimension(:), intent(in) :: &
-         wachspressA, & !< Input:
-         wachspressB    !< Input:
-
-    real(kind=RKIND), dimension(:,:), intent(in) :: &
-         wachspressKappa !< Input:
-
-    integer, intent(in) :: & !< Input:
-         nIntegrationPoints
-
-    real(kind=RKIND), dimension(:), intent(in) :: &
-         integrationU, & !< Input:
-         integrationV, & !< Input:
-         integrationWeights !< Input:
-
-    real(kind=RKIND), intent(in) :: &
-         normalizationFactor !< Input:
-
-    integer, dimension(:), allocatable :: &
-         nEdgesOnCellSubset
-
-    integer, dimension(:,:), allocatable :: &
-         vertexIndexSubset
-
-    real(kind=RKIND) :: &
-         basisIntegralsUSubTriangle, &
-         basisIntegralsVSubTriangle, &
-         basisIntegralsMetricSubTriangle
-
-    real(kind=RKIND), dimension(:), allocatable :: &
-         x, &
-         y, &
-         stressBasisFunction, &
-         velocityBasisFunction, &
-         velocityBasisDerivativeU, &
-         velocityBasisDerivativeV
-
-    real(kind=RKIND) :: &
-         u, &
-         v
-
-    integer :: &
-         iIntegrationPoint
-
-    real(kind=RKIND), dimension(2,2) :: &
-         mapping
-
-    real(kind=RKIND), dimension(:), allocatable :: &
-         jacobian
-
-    integer :: &
-         iSubTriangle, &
-         i1, &
-         i2
-
-    character(len=strKIND) :: filename
-
-    allocate(nEdgesOnCellSubset(nEdgesOnCell))
-    allocate(vertexIndexSubset(nEdgesOnCell,nEdgesOnCell))
-
-    call wachspress_indexes(&
-         nEdgesOnCell, &
-         nEdgesOnCellSubset, &
-         vertexIndexSubset)
-
-    allocate(jacobian(nEdgesOnCell))
-
-    do iSubTriangle = 1, nEdgesOnCell
-
-       i1 = iSubTriangle
-       i2 = seaice_wrapped_index(iSubTriangle + 1, nEdgesOnCell)
-
-       call get_triangle_mapping(&
-            mapping, &
-            jacobian(iSubTriangle), &
-            1.0_RKIND, 0.0_RKIND, &
-            0.0_RKIND, 1.0_RKIND, &
-            xLocal(i1), yLocal(i1), &
-            xLocal(i2), yLocal(i2))
-
-       allocate(x(nIntegrationPoints))
-       allocate(y(nIntegrationPoints))
-
-       do iIntegrationPoint = 1, nIntegrationPoints
-
-          call use_triangle_mapping(&
-               x(iIntegrationPoint),            y(iIntegrationPoint), &
-               integrationU(iIntegrationPoint), integrationV(iIntegrationPoint), &
-               mapping)
-
-       enddo ! iIntegrationPoint
-
-       allocate(stressBasisFunction(nIntegrationPoints))
-       allocate(velocityBasisFunction(nIntegrationPoints))
-       allocate(velocityBasisDerivativeU(nIntegrationPoints))
-       allocate(velocityBasisDerivativeV(nIntegrationPoints))
-
-       call wachspress_basis_function(&
-            nEdgesOnCell, iStressVertex, x, y, &
-            wachspressKappa, wachspressA, wachspressB, &
-            nEdgesOnCellSubset, vertexIndexSubset, &
-            stressBasisFunction)
-
-       call wachspress_basis_function(&
-            nEdgesOnCell, iVelocityVertex, x, y, &
-            wachspressKappa, wachspressA, wachspressB, &
-            nEdgesOnCellSubset, vertexIndexSubset, &
-            velocityBasisFunction)
-
-       call wachspress_basis_derivative(&
-            nEdgesOnCell, iVelocityVertex, x, y, &
-            wachspressKappa, wachspressA, wachspressB, &
-            nEdgesOnCellSubset, vertexIndexSubset, &
-            velocityBasisDerivativeU, &
-            velocityBasisDerivativeV)
-
-       basisIntegralsUSubTriangle      = 0.0_RKIND
-       basisIntegralsVSubTriangle      = 0.0_RKIND
-       basisIntegralsMetricSubTriangle = 0.0_RKIND
-
-       do iIntegrationPoint = 1, nIntegrationPoints
-
-          basisIntegralsUSubTriangle = basisIntegralsUSubTriangle + &
-               jacobian(iSubTriangle) * &
-               integrationWeights(iIntegrationPoint) * &
-               stressBasisFunction(iIntegrationPoint) * &
-               velocityBasisDerivativeU(iIntegrationPoint)
-
-          basisIntegralsVSubTriangle = basisIntegralsVSubTriangle + &
-               jacobian(iSubTriangle) * &
-               integrationWeights(iIntegrationPoint) * &
-               stressBasisFunction(iIntegrationPoint) * &
-               velocityBasisDerivativeV(iIntegrationPoint)
-
-          basisIntegralsMetricSubTriangle = basisIntegralsMetricSubTriangle + &
-               jacobian(iSubTriangle) * &
-               integrationWeights(iIntegrationPoint) * &
-               stressBasisFunction(iIntegrationPoint) * &
-               velocityBasisFunction(iIntegrationPoint)
-
-       enddo ! iIntegrationPoint
-
-       basisIntegralsU      = basisIntegralsU      + basisIntegralsUSubTriangle      / normalizationFactor
-       basisIntegralsV      = basisIntegralsV      + basisIntegralsVSubTriangle      / normalizationFactor
-       basisIntegralsMetric = basisIntegralsMetric + basisIntegralsMetricSubTriangle / normalizationFactor
-
-       deallocate(stressBasisFunction)
-       deallocate(velocityBasisFunction)
-       deallocate(velocityBasisDerivativeU)
-       deallocate(velocityBasisDerivativeV)
-
-       deallocate(x)
-       deallocate(y)
-
-    enddo ! iSubTriangle
-
-    deallocate(nEdgesOnCellSubset)
-    deallocate(vertexIndexSubset)
-
-    deallocate(jacobian)
-
-  end subroutine integrate_wachspress_polygon!}}}
 
 !-----------------------------------------------------------------------
 

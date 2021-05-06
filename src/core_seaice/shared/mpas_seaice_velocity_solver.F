@@ -12,12 +12,14 @@
 
 module seaice_velocity_solver
 
+#include "gpu_macros.inc"
+
   use mpas_derived_types
   use mpas_pool_routines
   use mpas_timekeeping
   use mpas_dmpar
   use mpas_timer
-  use mpas_log, only: mpas_log_write
+  use mpas_log, only: mpas_log_write, mpas_log_info
 
   implicit none
 
@@ -27,6 +29,33 @@ module seaice_velocity_solver
   public :: &
        seaice_init_velocity_solver, &
        seaice_run_velocity_solver
+
+  ! strain scheme type
+  integer :: &
+       strainSchemeType
+
+  integer, parameter :: &
+       WEAK_STRAIN_SCHEME = 1, &
+       VARIATIONAL_STRAIN_SCHEME = 2
+
+  logical :: &
+       averageVariationalStrains
+
+  ! stress divergence scheme type
+  integer :: &
+       stressDivergenceSchemeType
+
+  integer, parameter :: &
+       WEAK_STRESS_DIVERGENCE_SCHEME = 1, &
+       VARIATIONAL_STRESS_DIVERGENCE_SCHEME = 2
+
+  ! ocean stress type
+  integer :: &
+       oceanStressType
+
+  integer, parameter :: &
+       QUADRATIC_OCEAN_STRESS = 1, &
+       LINEAR_OCEAN_STRESS = 2
 
   ! velocity solver constants
   real(kind=RKIND), parameter, private :: &
@@ -72,12 +101,16 @@ contains
          block
 
     character(len=strKIND), pointer :: &
+         config_strain_scheme, &
          config_stress_divergence_scheme, &
          config_variational_basis, &
-         config_wachspress_integration_type
+         config_variational_denominator_type, &
+         config_wachspress_integration_type, &
+         config_ocean_stress_type
 
     logical, pointer :: &
          config_use_velocity_solver, &
+         config_average_variational_strain, &
          config_rotate_cartesian_grid, &
          config_include_metric_terms, &
          config_aggregate_halo_exch, &
@@ -131,6 +164,42 @@ contains
 
     if (config_use_velocity_solver) then
 
+       ! options
+       call MPAS_pool_get_config(domain % configs, "config_strain_scheme", config_strain_scheme)
+       if (trim(config_strain_scheme) == "weak") then
+          strainSchemeType = WEAK_STRAIN_SCHEME
+       else if (trim(config_strain_scheme) == "variational") then
+          strainSchemeType = VARIATIONAL_STRAIN_SCHEME
+       else
+          call MPAS_log_write("config_strain_scheme unknown: "//trim(config_strain_scheme), MPAS_LOG_CRIT)
+       endif
+
+       call MPAS_pool_get_config(domain % configs, "config_stress_divergence_scheme", config_stress_divergence_scheme)
+       if (trim(config_stress_divergence_scheme) == "weak") then
+          stressDivergenceSchemeType = WEAK_STRESS_DIVERGENCE_SCHEME
+       else if (trim(config_stress_divergence_scheme) == "variational") then
+          stressDivergenceSchemeType = VARIATIONAL_STRESS_DIVERGENCE_SCHEME
+       else
+          call MPAS_log_write("config_stress_divergence_scheme unknown: "//trim(config_stress_divergence_scheme), MPAS_LOG_CRIT)
+       endif
+
+       call MPAS_pool_get_config(domain % configs, "config_ocean_stress_type", config_ocean_stress_type)
+       if (trim(config_ocean_stress_type) == "quadratic") then
+          oceanStressType = QUADRATIC_OCEAN_STRESS
+       else if (trim(config_ocean_stress_type) == "linear") then
+          oceanStressType = LINEAR_OCEAN_STRESS
+       else
+          call MPAS_log_write("config_ocean_stress_type unknown: "//trim(config_ocean_stress_type), MPAS_LOG_CRIT)
+       endif
+
+       if (strainSchemeType           == VARIATIONAL_STRAIN_SCHEME .and. &
+           stressDivergenceSchemeType == WEAK_STRESS_DIVERGENCE_SCHEME) then
+          call MPAS_log_write("Cannot have variational strain scheme with variational stress divergence scheme", MPAS_LOG_CRIT)
+       endif
+
+       call MPAS_pool_get_config(domain % configs, "config_average_variational_strain", config_average_variational_strain)
+       averageVariationalStrains = config_average_variational_strain
+
        ! initialize the evp solver
        call seaice_init_evp(domain)
 
@@ -142,14 +211,16 @@ contains
           call MPAS_pool_get_subpool(block % structs, "velocity_weak", velocity_weak)
           call MPAS_pool_get_subpool(block % structs, "velocity_variational", velocity_variational)
 
-          call MPAS_pool_get_config(block % configs, "config_stress_divergence_scheme", config_stress_divergence_scheme)
           call MPAS_pool_get_config(block % configs, "config_variational_basis", config_variational_basis)
+          call MPAS_pool_get_config(block % configs, "config_variational_denominator_type", config_variational_denominator_type)
           call MPAS_pool_get_config(block % configs, "config_rotate_cartesian_grid", config_rotate_cartesian_grid)
           call MPAS_pool_get_config(block % configs, "config_include_metric_terms", config_include_metric_terms)
           call MPAS_pool_get_config(block % configs, "config_wachspress_integration_type", config_wachspress_integration_type)
           call MPAS_pool_get_config(block % configs, "config_wachspress_integration_order", config_wachspress_integration_order)
 
-          if (trim(config_stress_divergence_scheme) == "weak") then
+          ! init solvers
+          if (strainSchemeType           == WEAK_STRAIN_SCHEME .or. &
+              stressDivergenceSchemeType == WEAK_STRESS_DIVERGENCE_SCHEME) then
 
              call seaice_init_velocity_solver_weak(&
                   mesh, &
@@ -157,7 +228,10 @@ contains
                   velocity_weak, &
                   config_rotate_cartesian_grid)
 
-          else if (trim(config_stress_divergence_scheme) == "variational") then
+          endif
+
+          if (strainSchemeType           == VARIATIONAL_STRAIN_SCHEME .or. &
+              stressDivergenceSchemeType == VARIATIONAL_STRESS_DIVERGENCE_SCHEME) then
 
              call seaice_init_velocity_solver_variational(&
                   mesh, &
@@ -166,16 +240,9 @@ contains
                   config_rotate_cartesian_grid, &
                   config_include_metric_terms, &
                   config_variational_basis, &
+                  config_variational_denominator_type, &
                   config_wachspress_integration_type, &
                   config_wachspress_integration_order)
-
-          else if (trim(config_stress_divergence_scheme) == "none") then
-
-             continue
-
-          else
-
-             call MPAS_log_write("config_stress_divergence_scheme unknown: "//trim(config_stress_divergence_scheme), MPAS_LOG_CRIT)
 
           endif
 
@@ -545,6 +612,9 @@ contains
 
   subroutine velocity_solver_pre_subcycle(domain)
 
+    use seaice_mesh_pool, only: &
+         seaice_mesh_pool_update
+
     type(domain_type), intent(inout) :: &
          domain
 
@@ -592,6 +662,11 @@ contains
     call mpas_timer_start("init subcycle var")
     call init_subcycle_variables(domain)
     call mpas_timer_stop("init subcycle var")
+
+    ! update mesh pool variables
+    call mpas_timer_start("update mesh pool")
+    call seaice_mesh_pool_update(domain)
+    call mpas_timer_stop("update mesh pool")
 
   end subroutine velocity_solver_pre_subcycle
 
@@ -719,7 +794,8 @@ contains
          config_use_column_vertical_thermodynamics, &
          config_use_halo_exch, &
          config_aggregate_halo_exch, &
-         config_reuse_halo_exch
+         config_reuse_halo_exch, &
+         config_calc_velocity_masks
 
     integer :: &
          ierr
@@ -818,9 +894,11 @@ contains
     end do
 
     ! calculate computational masks
-    call stress_calculation_mask(domain)
-
-    call velocity_calculation_mask(domain)
+    call MPAS_pool_get_config(domain % configs, "config_calc_velocity_masks", config_calc_velocity_masks)
+    if (config_calc_velocity_masks) then
+       call stress_calculation_mask(domain)
+       call velocity_calculation_mask(domain)
+    endif
 
     ! halo exchange velocity mask
     call seaice_load_balance_timers(domain, "vel prep before")
@@ -2327,6 +2405,10 @@ contains
        domain, &
        clock)!{{{
 
+    use seaice_special_boundaries, only: &
+         seaice_set_special_boundaries_velocity, &
+         seaice_set_special_boundaries_velocity_masks
+
     type(domain_type), intent(inout) :: &
          domain !< Input/Output:
 
@@ -2339,6 +2421,27 @@ contains
     integer :: &
          iElasticSubcycle
 
+#if defined(MPAS_OPENMP_OFFLOAD) || defined(MPAS_OPENACC)
+    type (MPAS_pool_type), pointer :: &
+         velocityVariationalPool
+
+    real(kind=RKIND), dimension(:,:), pointer :: &
+         replacementPressure
+
+    call MPAS_pool_get_subpool(domain % blocklist % structs, "velocity_variational", velocityVariationalPool)
+    call MPAS_pool_get_array(velocityVariationalPool, "replacementPressure", replacementPressure)
+
+    call mpas_timer_start("Velocity solver memcpy HtoD")
+!$GPU DATA COPY_OUT_LP &
+!$GPUC  replacementPressure &
+!$GPUF
+    call mpas_timer_stop("Velocity solver memcpy HtoD")
+#endif
+
+    ! special boundaries
+    call seaice_set_special_boundaries_velocity(domain)
+    call seaice_set_special_boundaries_velocity_masks(domain)
+
     call MPAS_pool_get_config(domain % configs, "config_elastic_subcycle_number", config_elastic_subcycle_number)
 
     do iElasticSubcycle = 1, config_elastic_subcycle_number
@@ -2348,7 +2451,15 @@ contains
             clock, &
             iElasticSubcycle)
 
+       ! special boundaries
+       call seaice_set_special_boundaries_velocity(domain)
+       call seaice_set_special_boundaries_velocity_masks(domain)
+
     enddo
+
+#if defined(MPAS_OPENMP_OFFLOAD) || defined(MPAS_OPENACC)
+!$GPU DATA_END
+#endif
 
   end subroutine subcycle_velocity_solver!}}}
 
@@ -2369,14 +2480,19 @@ contains
        clock, &
        iElasticSubcycle)!{{{
 
-    use seaice_velocity_solver_weak, only: &
-         seaice_internal_stress_weak
-
-    use seaice_velocity_solver_variational, only: &
-         seaice_internal_stress_variational
+    use seaice_velocity_solver_constitutive_relation, only: &
+         constitutiveRelationType, &
+         EVP_CONSTITUTIVE_RELATION, &
+         REVISED_EVP_CONSTITUTIVE_RELATION
 
     use seaice_diagnostics, only: &
          seaice_load_balance_timers
+
+    use seaice_mesh_pool, only: &
+         stressDivergenceU, &
+         stressDivergenceV, &
+         uVelocity, &
+         vVelocity
 
     type(domain_type), intent(inout) :: &
          domain !< Input/Output:
@@ -2387,11 +2503,7 @@ contains
     integer, intent(in) :: &
          iElasticSubcycle !< Input: !! testing
 
-    character(len=strKIND), pointer :: &
-         config_stress_divergence_scheme
-
     logical, pointer :: &
-         config_revised_evp, &
          config_use_halo_exch, &
          config_aggregate_halo_exch, &
          config_reuse_halo_exch
@@ -2399,23 +2511,14 @@ contains
     integer :: &
          ierr
 
-    call MPAS_pool_get_config(domain % configs, "config_stress_divergence_scheme", config_stress_divergence_scheme)
-    call MPAS_pool_get_config(domain % configs, "config_revised_evp", config_revised_evp)
-
     ! calculate internal stresses
-    if (trim(config_stress_divergence_scheme) == "weak") then
+    call mpas_timer_start("Velocity solver internal stress")
+    call seaice_internal_stress(domain)
+    call mpas_timer_stop("Velocity solver internal stress")
 
-       call mpas_timer_start("Velocity solver internal stress")
-       call seaice_internal_stress_weak(domain)
-       call mpas_timer_stop("Velocity solver internal stress")
-
-    else if (trim(config_stress_divergence_scheme) == "variational") then
-
-       call mpas_timer_start("Velocity solver internal stress")
-       call seaice_internal_stress_variational(domain)
-       call mpas_timer_stop("Velocity solver internal stress")
-
-    endif
+#if defined(MPAS_OPENMP_OFFLOAD) || defined(MPAS_OPENACC)
+!$GPU UPDATE_H((stressDivergenceU, stressDivergenceV))
+#endif
 
     ! ocean stress coefficient
     call mpas_timer_start("ocn stress coef")
@@ -2423,13 +2526,13 @@ contains
     call mpas_timer_stop("ocn stress coef")
 
     ! solve for velocity
-    if (.not. config_revised_evp) then
+    if (constitutiveRelationType == EVP_CONSTITUTIVE_RELATION) then
 
        call mpas_timer_start("Velocity solver compute")
        call solve_velocity(domain)
        call mpas_timer_stop("Velocity solver compute")
 
-    else
+    else if (constitutiveRelationType == REVISED_EVP_CONSTITUTIVE_RELATION) then
 
        call mpas_timer_start("Velocity solver compute")
        call solve_velocity_revised(domain)
@@ -2482,7 +2585,391 @@ contains
 
     call seaice_load_balance_timers(domain, "vel after")
 
+#if defined(MPAS_OPENMP_OFFLOAD) || defined(MPAS_OPENACC)
+!$GPU UPDATE_D((uVelocity, vVelocity))
+#endif
+
   end subroutine single_subcycle_velocity_solver!}}}
+
+!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+!
+!  seaice_internal_stress
+!
+!> \brief
+!> \author Adrian K. Turner, LANL
+!> \date 28th January 2021
+!> \details
+!>
+!
+!-----------------------------------------------------------------------
+
+  subroutine seaice_internal_stress(domain)
+
+    use seaice_mesh_pool, only: &
+         basisGradientU, &
+         basisGradientV, &
+         basisIntegralsMetric, &
+         basisIntegralsU, &
+         basisIntegralsV, &
+         cellVerticesAtVertex, &
+         icePressure, &
+         solveStress, &
+         solveVelocity, &
+         stress11var => stress11, &
+         stress22var => stress22, &
+         stress12var => stress12, &
+         tanLatVertexRotatedOverRadius, &
+         uVelocity, &
+         vVelocity
+
+    use seaice_velocity_solver_weak, only: &
+         seaice_strain_tensor_weak, &
+         seaice_stress_tensor_weak, &
+         seaice_stress_divergence_weak
+
+    use seaice_velocity_solver_variational, only: &
+         seaice_strain_tensor_variational, &
+         seaice_stress_tensor_variational, &
+         seaice_stress_divergence_variational, &
+         seaice_average_strains_on_vertex
+
+    type(domain_type), intent(inout) :: &
+         domain
+
+    type(block_type), pointer :: &
+         blockPtr
+
+    type (MPAS_pool_type), pointer :: &
+         meshPool, &
+         velocityWeakPool, &
+         velocityVariationalPool, &
+         velocityWeakVariationalPool, &
+         velocitySolverPool
+
+    real(kind=RKIND), pointer :: &
+         elasticTimeStep
+
+    real(kind=RKIND), dimension(:), pointer :: &
+         stressDivergenceU, &
+         stressDivergenceV
+
+    real(kind=RKIND), dimension(:), pointer :: &
+         replacementPressureWeak, &
+         strain11weak, &
+         strain22weak, &
+         strain12weak, &
+         stress11weak, &
+         stress22weak, &
+         stress12weak, &
+         latCellRotated, &
+         latVertexRotated, &
+         areaCell
+
+    real(kind=RKIND), dimension(:,:,:), pointer :: &
+         normalVectorPolygon, &
+         normalVectorTriangle
+
+    real(kind=RKIND), dimension(:,:), pointer :: &
+         replacementPressureVar, &
+         strain11var, &
+         strain22var, &
+         strain12var
+
+    real(kind=RKIND), dimension(:), pointer :: &
+         variationalDenominator
+
+    blockPtr => domain % blocklist
+    do while (associated(blockPtr))
+
+       call MPAS_pool_get_subpool(blockPtr % structs, "mesh", meshPool)
+       call MPAS_pool_get_subpool(blockPtr % structs, "velocity_weak", velocityWeakPool)
+       call MPAS_pool_get_subpool(blockPtr % structs, "velocity_variational", velocityVariationalPool)
+       call MPAS_pool_get_subpool(blockPtr % structs, "velocity_weak_variational", velocityWeakVariationalPool)
+       call MPAS_pool_get_subpool(blockPtr % structs, "velocity_solver", velocitySolverPool)
+
+       call MPAS_pool_get_array(velocitySolverPool, "elasticTimeStep", elasticTimeStep)
+       call MPAS_pool_get_array(velocitySolverPool, "stressDivergenceU", stressDivergenceU)
+       call MPAS_pool_get_array(velocitySolverPool, "stressDivergenceV", stressDivergenceV)
+
+       if (strainSchemeType           == WEAK_STRAIN_SCHEME .or. &
+           stressDivergenceSchemeType == WEAK_STRESS_DIVERGENCE_SCHEME) then
+
+          call MPAS_pool_get_array(velocityWeakPool, "normalVectorPolygon", normalVectorPolygon)
+          call MPAS_pool_get_array(velocityWeakPool, "normalVectorTriangle", normalVectorTriangle)
+          call MPAS_pool_get_array(velocityWeakPool, "latCellRotated", latCellRotated)
+          call MPAS_pool_get_array(velocityWeakPool, "latVertexRotated", latVertexRotated)
+          call MPAS_pool_get_array(velocityWeakPool, "strain11", strain11weak)
+          call MPAS_pool_get_array(velocityWeakPool, "strain22", strain22weak)
+          call MPAS_pool_get_array(velocityWeakPool, "strain12", strain12weak)
+          call MPAS_pool_get_array(velocityWeakPool, "stress11", stress11weak)
+          call MPAS_pool_get_array(velocityWeakPool, "stress22", stress22weak)
+          call MPAS_pool_get_array(velocityWeakPool, "stress12", stress12weak)
+          call MPAS_pool_get_array(velocityWeakPool, "replacementPressure", replacementPressureWeak)
+
+       endif
+
+       if (strainSchemeType           == VARIATIONAL_STRAIN_SCHEME .or. &
+           stressDivergenceSchemeType == VARIATIONAL_STRESS_DIVERGENCE_SCHEME) then
+
+          call MPAS_pool_get_array(velocityVariationalPool, "strain11", strain11var)
+          call MPAS_pool_get_array(velocityVariationalPool, "strain22", strain22var)
+          call MPAS_pool_get_array(velocityVariationalPool, "strain12", strain12var)
+          call MPAS_pool_get_array(velocityVariationalPool, "replacementPressure", replacementPressureVar)
+          call MPAS_pool_get_array(velocityVariationalPool, "variationalDenominator", variationalDenominator)
+
+       endif
+
+       ! strain
+       if (strainSchemeType == WEAK_STRAIN_SCHEME) then
+
+          call mpas_timer_start("Velocity solver strain tensor")
+          call seaice_strain_tensor_weak(&
+               meshPool, &
+               strain11weak, &
+               strain22weak, &
+               strain12weak, &
+               uVelocity, &
+               vVelocity, &
+               normalVectorPolygon, &
+               latCellRotated, &
+               solveStress)
+          call mpas_timer_stop("Velocity solver strain tensor")
+
+       else if (strainSchemeType == VARIATIONAL_STRAIN_SCHEME) then
+
+          call mpas_timer_start("Velocity solver strain tensor")
+          call seaice_strain_tensor_variational(&
+               meshPool, &
+               strain11var, &
+               strain22var, &
+               strain12var, &
+               uVelocity, &
+               vVelocity, &
+               basisGradientU, &
+               basisGradientV, &
+               tanLatVertexRotatedOverRadius, &
+               solveStress)
+          call mpas_timer_stop("Velocity solver strain tensor")
+
+       endif
+
+       ! average variational strains around vertex
+       if (strainSchemeType == VARIATIONAL_STRAIN_SCHEME .and. &
+           averageVariationalStrains) then
+
+          call MPAS_pool_get_array(meshPool, "areaCell", areaCell)
+          call seaice_average_strains_on_vertex(&
+                areaCell, &
+                strain11var, &
+                strain22var, &
+                strain12var)
+       endif
+
+       ! weak strain / variational stress divergence
+       if (strainSchemeType           == WEAK_STRAIN_SCHEME .and. &
+           stressDivergenceSchemeType == VARIATIONAL_STRESS_DIVERGENCE_SCHEME) then
+
+          call mpas_timer_start("Velocity solver interpolate strain")
+          call interpolate_strains_weak_to_variational(&
+               meshPool, &
+               velocityWeakVariationalPool, &
+               strain11weak, &
+               strain22weak, &
+               strain12weak, &
+               strain11var, &
+               strain22var, &
+               strain12var)
+          call mpas_timer_stop("Velocity solver interpolate strain")
+
+       endif
+
+       ! consitutive relation
+       if (stressDivergenceSchemeType == WEAK_STRESS_DIVERGENCE_SCHEME) then
+
+          call mpas_timer_start("Velocity solver stress tensor")
+          call seaice_stress_tensor_weak(&
+               meshPool, &
+               stress11weak, &
+               stress22weak, &
+               stress12weak, &
+               strain11weak, &
+               strain22weak, &
+               strain12weak, &
+               icePressure, &
+               replacementPressureWeak, &
+               solveStress, &
+               elasticTimeStep)
+          call mpas_timer_stop("Velocity solver stress tensor")
+
+       else if (stressDivergenceSchemeType == VARIATIONAL_STRESS_DIVERGENCE_SCHEME) then
+
+          call mpas_timer_start("Velocity solver stress tensor")
+          call seaice_stress_tensor_variational(&
+               meshPool, &
+               stress11var, &
+               stress22var, &
+               stress12var, &
+               strain11var, &
+               strain22var, &
+               strain12var, &
+               icePressure, &
+               replacementPressureVar, &
+               solveStress, &
+               elasticTimeStep)
+          call mpas_timer_stop("Velocity solver stress tensor")
+
+       endif
+
+       ! stress divergence
+       if (stressDivergenceSchemeType == WEAK_STRESS_DIVERGENCE_SCHEME) then
+
+          call mpas_timer_start("Velocity solver stress divergence")
+          call seaice_stress_divergence_weak(&
+               meshPool, &
+               stressDivergenceU, &
+               stressDivergenceV, &
+               stress11weak, &
+               stress22weak, &
+               stress12weak, &
+               normalVectorTriangle, &
+               latVertexRotated, &
+               solveVelocity)
+          call mpas_timer_stop("Velocity solver stress divergence")
+
+       else if (stressDivergenceSchemeType == VARIATIONAL_STRESS_DIVERGENCE_SCHEME) then
+
+          call mpas_timer_start("Velocity solver stress divergence")
+          call seaice_stress_divergence_variational(&
+               meshPool, &
+               stressDivergenceU, &
+               stressDivergenceV, &
+               stress11var, &
+               stress22var, &
+               stress12var, &
+               basisIntegralsU, &
+               basisIntegralsV, &
+               basisIntegralsMetric, &
+               variationalDenominator, &
+               tanLatVertexRotatedOverRadius, &
+               cellVerticesAtVertex, &
+               solveVelocity)
+          call mpas_timer_stop("Velocity solver stress divergence")
+
+       endif
+
+       blockPtr => blockPtr % next
+    end do
+
+  end subroutine seaice_internal_stress
+
+!|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+!
+!  interpolate_strains_weak_to_variational
+!
+!> \brief
+!> \author Adrian K. Turner, LANL
+!> \date 29th January 2021
+!> \details
+!>
+!
+!-----------------------------------------------------------------------
+
+  subroutine interpolate_strains_weak_to_variational(&
+       meshPool, &
+       velocityWeakVariationalPool, &
+       strain11weak, &
+       strain22weak, &
+       strain12weak, &
+       strain11var, &
+       strain22var, &
+       strain12var)
+
+    use seaice_mesh_pool, only: &
+         nCells, &
+         nVerticesSolve, &
+         vertexDegree, &
+         cellsOnVertex, &
+         nEdgesOnCell, &
+         verticesOnCell
+
+    type (MPAS_pool_type), pointer :: &
+         meshPool, &
+         velocityWeakVariationalPool
+
+    real(kind=RKIND), dimension(:), intent(in) :: &
+         strain11weak, & !< Input/Output:
+         strain22weak, & !< Input/Output:
+         strain12weak    !< Input/Output:
+
+    real(kind=RKIND), dimension(:,:), intent(out) :: &
+         strain11var, & !< Input/Output:
+         strain22var, & !< Input/Output:
+         strain12var    !< Input/Output:
+
+    real(kind=RKIND), dimension(:), pointer :: &
+         strain11Vertex, &
+         strain22Vertex, &
+         strain12Vertex
+
+    real(kind=RKIND), dimension(:), pointer :: &
+         areaCell
+
+    real(kind=RKIND) :: &
+         denom
+
+    integer :: &
+         iVertex, &
+         iCellOnVertex, &
+         iCell, &
+         iVertexOnCell
+
+    call MPAS_pool_get_array(meshPool, "areaCell", areaCell)
+
+    call MPAS_pool_get_array(velocityWeakVariationalPool, "strain11Vertex", strain11Vertex)
+    call MPAS_pool_get_array(velocityWeakVariationalPool, "strain22Vertex", strain22Vertex)
+    call MPAS_pool_get_array(velocityWeakVariationalPool, "strain12Vertex", strain12Vertex)
+
+    do iVertex = 1, nVerticesSolve
+
+       strain11Vertex(iVertex) = 0.0_RKIND
+       strain22Vertex(iVertex) = 0.0_RKIND
+       strain12Vertex(iVertex) = 0.0_RKIND
+       denom = 0.0_RKIND
+
+       do iCellOnVertex = 1, vertexDegree
+
+          iCell = cellsOnVertex(iCellOnVertex,iVertex)
+
+          if (iCell >= 1 .and. iCell <= nCells) then
+             strain11Vertex(iVertex) = strain11Vertex(iVertex) + areaCell(iCell) * strain11weak(iCell)
+             strain22Vertex(iVertex) = strain22Vertex(iVertex) + areaCell(iCell) * strain22weak(iCell)
+             strain12Vertex(iVertex) = strain12Vertex(iVertex) + areaCell(iCell) * strain12weak(iCell)
+             denom = denom + areaCell(iCell)
+          endif
+
+       enddo ! iCellOnVertex
+
+       strain11Vertex(iVertex) = strain11Vertex(iVertex) / denom
+       strain22Vertex(iVertex) = strain22Vertex(iVertex) / denom
+       strain12Vertex(iVertex) = strain12Vertex(iVertex) / denom
+
+    enddo ! iVertex
+
+    do iCell = 1, nCells
+
+       do iVertexOnCell = 1, nEdgesOnCell(iCell)
+
+          iVertex = verticesOnCell(iVertexOnCell,iCell)
+
+          strain11var(iVertexOnCell,iCell) = strain11Vertex(iVertex)
+          strain22var(iVertexOnCell,iCell) = strain22Vertex(iVertex)
+          strain12var(iVertexOnCell,iCell) = strain12Vertex(iVertex)
+
+       enddo ! iVertexOnCell
+
+    enddo ! iCell
+
+  end subroutine interpolate_strains_weak_to_variational
 
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 !
@@ -2554,24 +3041,40 @@ contains
 
           call MPAS_pool_get_array(icestatePool, "iceAreaVertex", iceAreaVertex)
 
-          do iVertex = 1, nVerticesSolve
+          if (oceanStressType == QUADRATIC_OCEAN_STRESS) then
 
-             if (solveVelocity(iVertex) == 1) then
+             do iVertex = 1, nVerticesSolve
 
-                oceanStressCoeff(iVertex) = seaiceIceOceanDragCoefficient * seaiceDensitySeaWater * iceAreaVertex(iVertex) * &
-                     sqrt((uOceanVelocityVertex(iVertex) - uVelocity(iVertex))**2 + &
-                          (vOceanVelocityVertex(iVertex) - vVelocity(iVertex))**2)
+                if (solveVelocity(iVertex) == 1) then
 
-             endif
+                   oceanStressCoeff(iVertex) = seaiceIceOceanDragCoefficient * seaiceDensitySeaWater * iceAreaVertex(iVertex) * &
+                        sqrt((uOceanVelocityVertex(iVertex) - uVelocity(iVertex))**2 + &
+                             (vOceanVelocityVertex(iVertex) - vVelocity(iVertex))**2)
 
-          enddo ! iVertex
+                endif
 
-       else
+             enddo ! iVertex
+
+          else if (oceanStressType == LINEAR_OCEAN_STRESS) then
+
+             do iVertex = 1, nVerticesSolve
+
+                if (solveVelocity(iVertex) == 1) then
+
+                   oceanStressCoeff(iVertex) = seaiceIceOceanDragCoefficient * seaiceDensitySeaWater * iceAreaVertex(iVertex)
+
+                endif
+
+             enddo ! iVertex
+
+          end if ! oceanStressType
+
+       else ! configUseOceanStress
 
           ! no ocean stress
           oceanStressCoeff = 0.0_RKIND
 
-       endif
+       endif ! configUseOceanStress
 
        block => block % next
     end do
@@ -2608,8 +3111,6 @@ contains
     real(kind=RKIND), dimension(:), pointer :: &
          uVelocity, &
          vVelocity, &
-         uVelocityInitial, &
-         vVelocityInitial, &
          totalMassVertex, &
          totalMassVertexfVertex, &
          stressDivergenceU, &
@@ -2654,8 +3155,6 @@ contains
        call MPAS_pool_get_array(velocitySolverPool, "solveVelocity", solveVelocity)
        call MPAS_pool_get_array(velocitySolverPool, "uVelocity", uVelocity)
        call MPAS_pool_get_array(velocitySolverPool, "vVelocity", vVelocity)
-       call MPAS_pool_get_array(velocitySolverPool, "uVelocityInitial", uVelocityInitial)
-       call MPAS_pool_get_array(velocitySolverPool, "vVelocityInitial", vVelocityInitial)
        call MPAS_pool_get_array(velocitySolverPool, "stressDivergenceU", stressDivergenceU)
        call MPAS_pool_get_array(velocitySolverPool, "stressDivergenceV", stressDivergenceV)
        call MPAS_pool_get_array(velocitySolverPool, "airStressVertexU", airStressVertexU)
@@ -2667,7 +3166,9 @@ contains
        call MPAS_pool_get_array(velocitySolverPool, "oceanStressV", oceanStressV)
        call MPAS_pool_get_array(velocitySolverPool, "oceanStressCoeff", oceanStressCoeff)
 
-       !$omp parallel do default(shared) private(iVertex, leftMatrix, rightHandSide, solutionDenominator)
+#ifdef MPAS_OPENMP
+!$omp parallel do default(shared) private(iVertex, leftMatrix, rightHandSide, solutionDenominator)
+#endif
        do iVertex = 1, nVerticesSolve
 
           if (solveVelocity(iVertex) == 1) then

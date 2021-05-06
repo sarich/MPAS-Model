@@ -100,6 +100,9 @@ module li_core_interface
 
       ! Local variables
       character (len=StrKIND), pointer :: config_velocity_solver
+      character (len=StrKIND), pointer :: config_basal_mass_bal_float
+      character (len=StrKIND), pointer :: config_front_mass_bal_grounded
+      character (len=StrKIND), pointer :: config_thermal_solver
       logical, pointer :: config_SGH
       logical, pointer :: config_adaptive_timestep_include_DCFL
       logical, pointer :: config_write_albany_ascii_mesh
@@ -108,17 +111,26 @@ module li_core_interface
       logical, pointer :: SIAvelocityActive
       logical, pointer :: hydroActive
       logical, pointer :: observationsActive
+      logical, pointer :: ismip6ShelfMeltActive
+      logical, pointer :: ismip6GroundedFaceMeltActive
+      logical, pointer :: thermalActive
 
       ierr = 0
 
       call mpas_pool_get_config(configPool, 'config_velocity_solver', config_velocity_solver)
       call mpas_pool_get_config(configPool, 'config_SGH', config_SGH)
       call mpas_pool_get_config(configPool, 'config_write_albany_ascii_mesh', config_write_albany_ascii_mesh)
+      call mpas_pool_get_config(configPool, 'config_basal_mass_bal_float', config_basal_mass_bal_float)
+      call mpas_pool_get_config(configPool, 'config_front_mass_bal_grounded', config_front_mass_bal_grounded)
+      call mpas_pool_get_config(configPool, 'config_thermal_solver', config_thermal_solver)
 
       call mpas_pool_get_package(packagePool, 'SIAvelocityActive', SIAvelocityActive)
       call mpas_pool_get_package(packagePool, 'higherOrderVelocityActive', higherOrderVelocityActive)
       call mpas_pool_get_package(packagePool, 'hydroActive', hydroActive)
       call mpas_pool_get_package(packagePool, 'observationsActive', observationsActive)
+      call mpas_pool_get_package(packagePool, 'ismip6ShelfMeltActive', ismip6ShelfMeltActive)
+      call mpas_pool_get_package(packagePool, 'ismip6GroundedFaceMeltActive', ismip6GroundedFaceMeltActive)
+      call mpas_pool_get_package(packagePool, 'thermalActive', thermalActive)
 
       if (trim(config_velocity_solver) == 'sia') then
          SIAvelocityActive = .true.
@@ -140,6 +152,26 @@ module li_core_interface
          call mpas_log_write("The 'observations' package and assocated variables have been enabled because " // &
               "'config_write_albany_ascii_mesh' is set to .true.")
       endif
+
+      if (trim(config_basal_mass_bal_float) == 'ismip6') then
+         ismip6ShelfMeltActive = .true.
+         call mpas_log_write("The 'ismip6Melt' package and assocated variables have been enabled because " // &
+              "'config_basal_mass_bal_float' is set to 'ismip6'")
+      endif
+
+      if (trim(config_front_mass_bal_grounded) == 'ismip6') then
+         ismip6GroundedFaceMeltActive=.true.
+         call mpas_log_write("The 'ismip6GroundedFaceMelt' package and assocated variables have been enabled because " // &
+               "'config_front_mass_bal_grounded' is set to 'ismip6'")
+      endif
+
+      if ((trim(config_thermal_solver) == 'temperature') .or. (trim(config_thermal_solver) == 'enthalpy')) then
+         thermalActive = .true.
+         call mpas_log_write("The 'thermal' package and assocated variables have been enabled because " // &
+              "'config_thermal_solver' is set to either 'temperature' or 'enthalpy'.")
+      endif
+
+
 
       ! call setup packages in analysis driver
       call li_analysis_setup_packages(configPool, packagePool, ierr)
@@ -190,15 +222,16 @@ module li_core_interface
    !>  and allow the core to specify details of the configuration.
    !
    !-----------------------------------------------------------------------
-   function li_setup_log(logInfo, domain) result(iErr)!{{{
+   function li_setup_log(logInfo, domain, unitNumbers) result(iErr)!{{{
 
       use mpas_derived_types
       use mpas_log
 
       implicit none
 
-      type (mpas_log_type), intent(inout), pointer :: logInfo  !< logging information object to set up
-      type (domain_type), intent(in), pointer :: domain  !< domain object to provide info for setting up log manager
+      type (mpas_log_type), intent(inout), pointer :: logInfo    !< logging information object to set up
+      type (domain_type), intent(in), pointer :: domain          !< domain object to provide info for setting up log manager
+      integer, dimension(2), intent(in), optional :: unitNumbers !< Fortran unit numbers to use for output and error logs
       integer :: iErr
 
       ! Local variables
@@ -207,7 +240,7 @@ module li_core_interface
       iErr = 0
 
       ! Initialize log manager
-      call mpas_log_init(logInfo, domain, err=local_err)
+      call mpas_log_init(logInfo, domain, unitNumbers=unitNumbers, err=local_err)
       iErr = ior(iErr, local_err)
 
       ! Set core specific options here

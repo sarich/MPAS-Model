@@ -42,8 +42,7 @@ contains
   subroutine seaice_timestep(&
        domain, &
        clock, &
-       itimestep, &
-       ierr)!{{{
+       itimestep)!{{{
 
     use mpas_timer
 
@@ -51,9 +50,6 @@ contains
          seaice_set_time_diagnostics, &
          seaice_check_state, &
          seaice_load_balance_timers
-
-    use seaice_unit_test, only: &
-         seaice_perform_unit_test
 
     use seaice_velocity_solver, only: &
          seaice_run_velocity_solver
@@ -70,6 +66,12 @@ contains
          seaice_column_reinitialize_diagnostics_bgc, &
          seaice_column_reinitialize_diagnostics_dynamics
 
+    use seaice_prescribed, only: &
+         seaice_run_prescribed_ice
+
+    use seaice_special_boundaries, only: &
+         seaice_set_special_boundaries_zero_tracers
+
     type(domain_type), intent(inout) :: &
          domain !< Input/Output:
 
@@ -79,9 +81,6 @@ contains
     integer, intent(in) :: &
          itimestep !< Input:
 
-    integer, intent(inout) :: &
-         ierr !< Input
-
     type(block_type), pointer :: &
          block
 
@@ -89,7 +88,7 @@ contains
          configs
 
     logical, pointer :: &
-         config_perform_unit_test, &
+         config_use_dynamics, &
          config_use_advection
 
     integer, pointer :: &
@@ -121,47 +120,46 @@ contains
     configs => domain % configs
 
     call MPAS_pool_get_config(configs, "config_use_advection", config_use_advection)
-    call MPAS_pool_get_config(configs, "config_perform_unit_test", config_perform_unit_test)
 
-    if (config_perform_unit_test) then
-       call seaice_perform_unit_test(domain)
-       return
-    endif
+    ! prescribed ice mode
+    call seaice_run_prescribed_ice(domain)
 
     ! pre dynamics column physics
     call mpas_timer_start("Column pre-dynamics")
-    call seaice_column_predynamics_time_integration(domain, clock, ierr)
-    if (ierr > 0) return
+    call seaice_column_predynamics_time_integration(domain, clock)
     call mpas_timer_stop("Column pre-dynamics")
 
-    ! loop of dynamcis subcycle
-    call MPAS_pool_get_config(configs, "config_dynamics_subcycle_number", config_dynamics_subcycle_number)
-    do iDynamicsSubcycle = 1, config_dynamics_subcycle_number
+    ! dynamics
+    call MPAS_pool_get_config(configs, "config_use_dynamics", config_use_dynamics)
+    if (config_use_dynamics) then
 
-       ! reinitialize dynamics diagnostics
-       call mpas_timer_start("Reinitialize diagnostics dynamics")
-       call seaice_column_reinitialize_diagnostics_dynamics(domain)
-       call mpas_timer_stop("Reinitialize diagnostics dynamics")
+       ! loop of dynamcis subcycle
+       call MPAS_pool_get_config(configs, "config_dynamics_subcycle_number", config_dynamics_subcycle_number)
+       do iDynamicsSubcycle = 1, config_dynamics_subcycle_number
 
-       ! velocity solve
-       call mpas_timer_start("Velocity solver")
-       call seaice_run_velocity_solver(domain, clock)
-       call mpas_timer_stop("Velocity solver")
+          ! reinitialize dynamics diagnostics
+          call mpas_timer_start("Reinitialize diagnostics dynamics")
+          call seaice_column_reinitialize_diagnostics_dynamics(domain)
+          call mpas_timer_stop("Reinitialize diagnostics dynamics")
 
-       ! advection
-       call mpas_timer_start("Advection")
-       if (config_use_advection) &
-            call seaice_run_advection(domain, clock, ierr)
-       call mpas_timer_stop("Advection")
-       if (ierr > 0) return
+          ! velocity solve
+          call mpas_timer_start("Velocity solver")
+          call seaice_run_velocity_solver(domain, clock)
+          call mpas_timer_stop("Velocity solver")
 
-       ! ridging
-       call mpas_timer_start("Column")
-       call seaice_column_dynamics_time_integration(domain, clock, ierr)
-       call mpas_timer_stop("Column")
-       if (ierr > 0) return
+          ! advection
+          call mpas_timer_start("Advection")
+          if (config_use_advection) &
+               call seaice_run_advection(domain, clock)
+          call mpas_timer_stop("Advection")
 
-    enddo ! iDynamicsSubcycle
+          ! ridging
+          call mpas_timer_start("Column")
+          call seaice_column_dynamics_time_integration(domain, clock)
+          call mpas_timer_stop("Column")
+
+       enddo ! iDynamicsSubcycle
+    endif ! config_use_dynamics
 
     ! shortwave
     call mpas_timer_start("Column post-dynamics")
@@ -170,6 +168,9 @@ contains
 
     ! check the physical state of the model
     call seaice_check_state(domain)
+
+    ! tracer special boundaries
+    call seaice_set_special_boundaries_zero_tracers(domain)
 
   end subroutine seaice_timestep!}}}
 

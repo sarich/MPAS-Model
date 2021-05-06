@@ -20,6 +20,7 @@ module seaice_initialize
   use mpas_io_units
   use mpas_abort
   use mpas_log, only: mpas_log_write
+  use mpas_timer, only: mpas_timer_start, mpas_timer_stop
 
   implicit none
 
@@ -58,6 +59,13 @@ contains
     use seaice_forcing, only: seaice_forcing_init, seaice_reset_coupler_fluxes
     use seaice_diagnostics, only: &
          seaice_set_testing_system_test_arrays
+    use seaice_mesh_pool, only: &
+         seaice_mesh_pool_create
+    use seaice_prescribed, only: &
+         seaice_init_prescribed_ice
+    use seaice_special_boundaries, only: &
+         seaice_init_special_boundaries, &
+         seaice_set_special_boundaries_zero_tracers
 
     type(domain_type), intent(inout) :: &
          domain !< Input/Output:
@@ -79,12 +87,21 @@ contains
     ! initialize junk values
     call init_junk_values(domain)
 
+    ! initialize special boundaries
+    call seaice_init_special_boundaries(domain)
+
+    ! initialize prescribed ice
+    call seaice_init_prescribed_ice(domain)
+
     ! initialize landice mask if needed for testing
     call init_test_ice_shelf_mask(domain)
 
     ! mesh initialization
     call mpas_log_write(" Initialize mesh...")
     call seaice_init_mesh(domain)
+
+    call mpas_log_write(" Initialize mesh pool...")
+    call seaice_mesh_pool_create(domain)
 
     ! init the basic column physics package
     call mpas_log_write(" Initialize column parameters...")
@@ -96,11 +113,13 @@ contains
 
     ! initialize forcing
     call mpas_log_write(" Initialize forcing...")
-    call seaice_forcing_init(domain)
+    call seaice_forcing_init(domain, clock)
 
     ! init dynamics
     call mpas_log_write(" Initialize velocity solver...")
+    call mpas_timer_start("Velocity solver init")
     call seaice_init_velocity_solver(domain)
+    call mpas_timer_stop("Velocity solver init")
 
     ! init advection
     call mpas_log_write(" Initialize advection...")
@@ -121,6 +140,9 @@ contains
     ! coupler flux reset
     call mpas_log_write(" Initialize coupler fluxes...")
     call seaice_reset_coupler_fluxes(domain)
+
+    ! special boundaries tracers
+    call seaice_set_special_boundaries_zero_tracers(domain)
 
   end subroutine seaice_init!}}}
 
@@ -605,7 +627,8 @@ contains
     integer :: &
          iCell, &
          iCategory, &
-         iIceLayer
+         iIceLayer, &
+         iSnowLayer
 
     real(kind=RKIND), parameter :: &
          initialCategorySnowThickness = 0.2_RKIND
@@ -688,8 +711,9 @@ contains
           snowVolumeCategory(1,:,iCell) = 0.0_RKIND
 
           surfaceTemperature(1,:,iCell) = seaFreezingTemperature(iCell)
-
-          snowEnthalpy(1,:,iCell) = colpkg_enthalpy_snow(0.0_RKIND)
+          do iSnowLayer = 1, nSnowLayers
+             snowEnthalpy(iSnowLayer,:,iCell) = colpkg_enthalpy_snow(0.0_RKIND)
+          end do
 
        endif
 
@@ -958,9 +982,6 @@ contains
        block, &
        configs)!{{{
 
-    use seaice_constants, only: &
-         earthRadius
-
     type(block_type), intent(inout) :: &
          block !< Input/Output:
 
@@ -986,6 +1007,7 @@ contains
          surfaceTemperature
 
     real(kind=RKIND), pointer :: &
+         earthRadius, &
          config_initial_ice_area, &
          config_initial_ice_volume, &
          config_initial_snow_volume
@@ -996,8 +1018,12 @@ contains
     integer :: &
          iCell
 
-    real(kind=RKIND), parameter :: &
-         circle_radius = 0.1_RKIND*earthRadius
+    real(kind=RKIND) :: &
+         circle_radius
+
+    call MPAS_pool_get_config(configs, "config_earth_radius", earthRadius)
+
+    circle_radius = 0.1_RKIND*earthRadius
 
     call MPAS_pool_get_config(configs, "config_initial_ice_area", config_initial_ice_area)
     call MPAS_pool_get_config(configs, "config_initial_ice_volume", config_initial_ice_volume)

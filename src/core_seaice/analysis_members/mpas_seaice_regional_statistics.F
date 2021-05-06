@@ -1,10 +1,3 @@
-! Copyright (c) 2013,  Los Alamos National Security, LLC (LANS)
-! and the University Corporation for Atmospheric Research (UCAR).
-!
-! Unless noted otherwise source code is licensed under the BSD license.
-! Additional copyright and license information can be found in the LICENSE file
-! distributed with this code, or at http://mpas-dev.github.com/license.html
-!
 !|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 !
 !  seaice_regional_statistics
@@ -768,6 +761,8 @@ contains
     outputField % isVarArray       = .false.
     outputField % isPersistent     = .true.
 
+    allocate(outputField % attLists(1))
+
   end subroutine create_new_output_field_1D
 
 !***********************************************************************
@@ -829,6 +824,8 @@ contains
     outputField % isActive         = .true.
     outputField % isVarArray       = .false.
     outputField % isPersistent     = .true.
+
+    allocate(outputField % attLists(1))
 
   end subroutine create_new_output_field_2D
 
@@ -1092,13 +1089,12 @@ contains
          call MPAS_pool_get_array(velocitySolverPool, "icePressure", icePressure)
          call MPAS_pool_get_array(velocitySolverPool, "uVelocity", uVelocity)
          call MPAS_pool_get_array(velocitySolverPool, "vVelocity", vVelocity)
+         call MPAS_pool_get_array(velocitySolverPool, "uVelocityCell", uVelocityCell)
+         call MPAS_pool_get_array(velocitySolverPool, "vVelocityCell", vVelocityCell)
          call MPAS_pool_get_array(velocitySolverPool, "dynamicallyLockedCellsMask", dynamicallyLockedCellsMask)
 
          call MPAS_pool_get_array(regionsPool, 'regionCellMasks', regionCellMasks)
          call MPAS_pool_get_array(regionsPool, 'regionVertexMasks', regionVertexMasks)
-
-         call MPAS_pool_get_array(regionalStatisticsAMPool, 'uVelocityCell', uVelocityCell)
-         call MPAS_pool_get_array(regionalStatisticsAMPool, 'vVelocityCell', vVelocityCell)
 
          ! cell centre velocity for velocity statistics
          call seaice_interpolate_vertex_to_cell(meshPool, boundaryPool, uVelocityCell, uVelocity)

@@ -33,7 +33,8 @@ module seaice_constants
        rhofresh, &
        vonkar, &
        iceruf, &
-       zref
+       zref, &
+       sk_l
 
   private
   save
@@ -50,8 +51,7 @@ module seaice_constants
   ! Earth constants
   real (kind=RKIND), parameter, public :: &
        seaiceGravity = gravit, &    ! gravitational acceleration (m/s^2)
-       earthRadius = 6371229.0_RKIND, & ! radius of Earth in [m]
-       omega       = 7.29212e-5_RKIND   ! angular rotation rate of the Earth [s-1]
+       omega         = 7.29212e-5_RKIND   ! angular rotation rate of the Earth [s-1]
 
   character (len=*), public, parameter :: &
        coupleAlarmID = 'coupling'
@@ -90,6 +90,10 @@ module seaice_constants
        iceAreaMinimum       = seaicePuny, &
        iceThicknessMinimum  = seaicePuny, &
        snowThicknessMinimum = seaicePuny
+
+   ! biogeochemistry constants
+   real(kind=RKIND), parameter, public :: &
+        skeletalLayerThickness = sk_l
 
 
 end module seaice_constants

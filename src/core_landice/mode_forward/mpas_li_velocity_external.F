@@ -64,6 +64,7 @@ module li_velocity_external
       subroutine velocity_solver_set_parameters(gravity, config_ice_density, config_ocean_density, config_sea_level, &
          config_default_flowParamA, &
          config_flowLawExponent, config_dynamic_thickness, iceMeltingPointPressureDependence, &
+         config_thermal_thickness, &
          li_mask_ValueDynamicIce, li_mask_ValueIce, config_use_glp) &
          bind(C, name="velocity_solver_set_parameters")
 
@@ -72,7 +73,8 @@ module li_velocity_external
          INTEGER(C_INT) :: li_mask_ValueDynamicIce, li_mask_ValueIce
          REAL(C_DOUBLE) :: config_ice_density, config_ocean_density, config_sea_level, config_default_flowParamA, &
                            config_flowLawExponent, config_dynamic_thickness, gravity, &
-                           iceMeltingPointPressureDependence
+                           iceMeltingPointPressureDependence, &
+                           config_thermal_thickness
          LOGICAL(C_BOOL) :: config_use_glp
       end subroutine velocity_solver_set_parameters
 
@@ -148,8 +150,8 @@ contains
       call mpas_pool_get_config(liConfigs, 'config_velocity_solver', config_velocity_solver)
 
       ! Check for configuration options that are incompatible with external velocity solver conventions
-      if (config_num_halos < 2) then
-         call mpas_log_write("External velocity solvers require that config_num_halos >= 2", MPAS_LOG_ERR)
+      if (config_num_halos < 3) then
+         call mpas_log_write("External velocity solvers require that config_num_halos >= 3", MPAS_LOG_ERR)
          err_tmp = 1
       endif
       err = ior(err,err_tmp)
@@ -261,7 +263,7 @@ contains
       real (kind=RKIND), pointer :: radius
       type (field1DInteger), pointer :: indexToCellIDField, indexToEdgeIDField, indexToVertexIDField
       real (kind=RKIND), pointer :: config_ice_density, config_ocean_density,  config_sea_level, config_default_flowParamA, &
-                                    config_flowLawExponent, config_dynamic_thickness
+                                    config_thermal_thickness, config_flowLawExponent, config_dynamic_thickness
       logical, pointer :: config_use_glp
 
       ! halo exchange arrays
@@ -327,7 +329,7 @@ contains
       call velocity_solver_set_grid_data(nCells, nEdges, nVertices, nVertInterfaces, &
               nCellsSolve, nEdgesSolve, nVerticesSolve, maxNEdgesOnCell, radius, &
               cellsOnEdge, cellsOnVertex, verticesOnCell, verticesOnEdge, edgesOnCell, &
-              nEdgesOnCell, indexToCellID, &
+              nEdgesOnCell, indexToCellID, indexToEdgeID, indexToVertexID, &
               xCell, yCell, zCell, xVertex, yVertex, zVertex, areaTriangle, &
               sendCellsArray, recvCellsArray, &
               sendEdgesArray, recvEdgesArray, &
@@ -352,6 +354,7 @@ contains
       call mpas_pool_get_config(liConfigs, 'config_sea_level', config_sea_level)
       call mpas_pool_get_config(liConfigs, 'config_default_flowParamA', config_default_flowParamA)
       call mpas_pool_get_config(liConfigs, 'config_flowLawExponent', config_flowLawExponent)
+      call mpas_pool_get_config(liConfigs, 'config_thermal_thickness', config_thermal_thickness)
       call mpas_pool_get_config(liConfigs, 'config_dynamic_thickness', config_dynamic_thickness)
       call mpas_pool_get_config(liConfigs, 'config_use_glp', config_use_glp)
 #if defined(USE_EXTERNAL_L1L2) || defined(USE_EXTERNAL_FIRSTORDER) || defined(USE_EXTERNAL_STOKES)
@@ -359,6 +362,7 @@ contains
          config_default_flowParamA, &
          config_flowLawExponent, config_dynamic_thickness, &
          iceMeltingPointPressureDependence, &
+         config_thermal_thickness, &
          li_mask_ValueAlbanyActive, li_mask_ValueIce, &
          logical(config_use_glp, KIND=1) )
 
@@ -389,7 +393,7 @@ contains
 !
 !-----------------------------------------------------------------------
 
-   subroutine li_velocity_external_solve(meshPool, geometryPool, thermalPool, scratchPool, velocityPool, err)
+   subroutine li_velocity_external_solve(meshPool, geometryPool, thermalPool, hydroPool, scratchPool, velocityPool, err)
 
        use li_mask
 
@@ -407,6 +411,9 @@ contains
 
       type (mpas_pool_type), intent(in) :: &
           thermalPool !< Input: thermal information
+
+      type (mpas_pool_type), intent(in) :: &
+          hydroPool !< Input: hydro information
 
       type (mpas_pool_type), intent(in) :: &
           scratchPool !< Input: scratch information
@@ -436,25 +443,34 @@ contains
 
       real (kind=RKIND), dimension(:), pointer :: &
          thickness, bedTopography, lowerSurface, upperSurface, layerThicknessFractions, betaSolve, sfcMassBal
+      real (kind=RKIND), dimension(:), pointer :: drivingStressVert
+      real (kind=RKIND), dimension(:), pointer :: drivingStress
       real (kind=RKIND), dimension(:,:), pointer :: &
          normalVelocity, uReconstructX, uReconstructY, uReconstructZ
       real (kind=RKIND), dimension(:,:), pointer :: temperature
       real (kind=RKIND), dimension(:), pointer :: stiffnessFactor
+      real (kind=RKIND), dimension(:), pointer :: effectivePressure
+      real (kind=RKIND), dimension(:), pointer :: effectivePressureLimited
+      real (kind=RKIND), dimension(:), pointer :: muFriction
       real (kind=RKIND), pointer :: deltat
-      integer, dimension(:), pointer :: vertexMask, cellMask, edgeMask, floatingEdges
+      integer, dimension(:), pointer :: vertexMask, cellMask, edgeMask
       integer, dimension(:,:), pointer :: dirichletVelocityMask
       character (len=StrKIND), pointer :: config_velocity_solver
       logical, pointer :: config_always_compute_fem_grid
       logical, pointer :: config_output_external_velocity_solver_data
+      logical, pointer :: config_nonconvergence_error
       real (kind=RKIND), pointer :: config_ice_density
+      real (kind=RKIND), pointer :: config_effective_pressure_max
       integer, pointer :: anyDynamicVertexMaskChanged
       integer, pointer :: dirichletMaskChanged
       integer, pointer :: nEdges
+      integer, pointer :: nCells
       integer, pointer :: nVertLevels
       integer, pointer :: timestepNumber
       type (field2dReal), pointer :: dissipationVertexField
       real (kind=RKIND), dimension(:,:), pointer :: heatDissipation  ! on cells
       integer :: iEdge
+      integer :: iCell
       real(kind=RKIND), parameter :: secondsInYear = 365.0_RKIND * 24.0_RKIND * 3600.0_RKIND
          !< The value of seconds in a year assumed by external dycores
       integer, target :: err_tmp
@@ -468,13 +484,16 @@ contains
       call mpas_pool_get_config(liConfigs, 'config_always_compute_fem_grid', config_always_compute_fem_grid)
       call mpas_pool_get_config(liConfigs, 'config_output_external_velocity_solver_data', &
          config_output_external_velocity_solver_data)
+      call mpas_pool_get_config(liConfigs, 'config_nonconvergence_error', config_nonconvergence_error)
       call mpas_pool_get_config(liConfigs, 'config_ice_density', config_ice_density)
+      call mpas_pool_get_config(liConfigs, 'config_effective_pressure_max', config_effective_pressure_max)
 
       ! Mesh variables
       call mpas_pool_get_array(meshPool, 'layerThicknessFractions', layerThicknessFractions)
       call mpas_pool_get_array(meshPool, 'deltat', deltat)
       call mpas_pool_get_array(meshPool, 'timestepNumber', timestepNumber)
       call mpas_pool_get_dimension(meshPool, 'nEdges', nEdges)
+      call mpas_pool_get_dimension(meshPool, 'nCells', nCells)
 
       ! Geometry variables
       call mpas_pool_get_array(geometryPool, 'thickness', thickness)
@@ -496,16 +515,28 @@ contains
       call mpas_pool_get_array(velocityPool, 'uReconstructY', uReconstructY)
       call mpas_pool_get_array(velocityPool, 'uReconstructZ', uReconstructZ)
       call mpas_pool_get_array(velocityPool, 'betaSolve', betaSolve)
+      call mpas_pool_get_array(velocityPool, 'drivingStressVert', drivingStressVert)
+      call mpas_pool_get_array(velocityPool, 'drivingStress', drivingStress)
+      call mpas_pool_get_array(velocityPool, 'muFriction', muFriction)
       call mpas_pool_get_array(velocityPool, 'anyDynamicVertexMaskChanged', anyDynamicVertexMaskChanged)
       call mpas_pool_get_array(velocityPool, 'dirichletMaskChanged', dirichletMaskChanged)
       call mpas_pool_get_array(velocityPool, 'dirichletVelocityMask', dirichletVelocityMask, timeLevel = 1)
-      call mpas_pool_get_array(velocityPool, 'floatingEdges', floatingEdges)
       call mpas_pool_get_array(velocityPool, 'stiffnessFactor', stiffnessFactor)
+
+      ! Hydro variables
+      call mpas_pool_get_array(hydroPool, 'effectivePressure', effectivePressure)
+      call mpas_pool_get_array(velocityPool, 'effectivePressureLimited', effectivePressureLimited)
 
 #if defined(USE_EXTERNAL_L1L2) || defined(USE_EXTERNAL_FIRSTORDER) || defined(USE_EXTERNAL_STOKES)
       ! Capture Albany output
       call interface_redirect_stdout(timestepNumber)
 #endif
+
+      ! Create version of effectivePressure field with limits applied
+      do iCell = 1, nCells
+         effectivePressureLimited(iCell) = max(0.0_RKIND, effectivePressure(iCell)) ! Never pass a negative N
+         effectivePressureLimited(iCell) = min(config_effective_pressure_max, effectivePressureLimited(iCell))
+      enddo
 
       ! ==================================================================
       ! External dycore calls to be made only when vertex mask changes
@@ -517,7 +548,7 @@ contains
           (dirichletMaskChanged == 1) ) then
          call mpas_log_write("Generating new external velocity solver FEM grid.", flushNow=.true.)
          call generate_fem_grid(config_velocity_solver, vertexMask, cellMask, dirichletVelocityMask, &
-              floatingEdges, layerThicknessFractions, lowerSurface, thickness, err)
+              layerThicknessFractions, lowerSurface, thickness, err)
       endif
 
 
@@ -567,14 +598,21 @@ contains
           err_albany => err_tmp
           call velocity_solver_solve_FO(bedTopography, lowerSurface, thickness, &
                 betaSolve, sfcMassBal, temperature, stiffnessFactor, &
+                effectivePressureLimited, muFriction, &
                 uReconstructX, uReconstructY,  &  ! Dirichlet boundary values to apply where dirichletVelocityMask=1
-                normalVelocity, dissipationVertexField % array, uReconstructX, uReconstructY, &  ! return values
+                normalVelocity, drivingStressVert, dissipationVertexField % array, uReconstructX, uReconstructY, &  ! return values
                 deltat, err_albany)  ! return values
           call mpas_timer_stop("velocity_solver_solve_FO")
 
-          if (err_tmp > 0) then
-             call mpas_log_write("Albany velocity solve encountered an error!  " // &
-                "Check log.albany.0000.out for more information.", MPAS_LOG_ERR)
+          if (err_tmp == 1) then
+             if (config_nonconvergence_error) then
+                call mpas_log_write("Albany velocity solve failed to converge!  " // &
+                   "Check log.albany.0000.out for more information.", MPAS_LOG_ERR)
+             else
+                call mpas_log_write("Albany velocity solve failed to converge!  " // &
+                   "Check log.albany.0000.out for more information.", MPAS_LOG_WARN)
+                err_tmp = 0
+             endif
           endif
           err = ior(err,err_tmp)
 
@@ -583,6 +621,8 @@ contains
           call li_interpolate_vertex_to_cell_2d(meshPool, dissipationVertexField % array, heatDissipation)
           heatDissipation = heatDissipation / (config_ice_density * cp_ice)
           call mpas_deallocate_scratch_field(dissipationVertexField, .true.)
+
+          call li_interpolate_vertex_to_cell_1d(meshPool, drivingStressVert, drivingStress)
 
           if (config_output_external_velocity_solver_data) then
              call mpas_timer_start("velocity_solver export")
@@ -686,7 +726,7 @@ contains
 
 #if defined(USE_EXTERNAL_L1L2) || defined(USE_EXTERNAL_FIRSTORDER) || defined(USE_EXTERNAL_STOKES)
       ! This call is needed for using any of the external velocity solvers
-   !   call velocity_solver_finalize()
+      call velocity_solver_finalize()
 #else
       call mpas_log_write("To run with an external velocity solver you must compile MPAS with one.", MPAS_LOG_ERR)
       err = 1
@@ -739,11 +779,14 @@ subroutine li_velocity_external_write_albany_mesh(domain)
          observedSurfaceVelocityX, observedSurfaceVelocityY, observedSurfaceVelocityUncertainty
       real (kind=RKIND), dimension(:), pointer :: observedThicknessTendency, observedThicknessTendencyUncertainty
       real (kind=RKIND), dimension(:,:), pointer :: temperature
-      integer, dimension(:), pointer :: vertexMask, cellMask, edgeMask, floatingEdges, indexToCellID
+      real (kind=RKIND), dimension(:), pointer :: surfaceAirTemperature, basalHeatFlux
+      integer, dimension(:), pointer :: vertexMask, cellMask, edgeMask, indexToCellID
       real (kind=RKIND), dimension(:,:), pointer :: layerThickness
       real (kind=RKIND), dimension(:), pointer :: stiffnessFactor
+      real (kind=RKIND), dimension(:), pointer :: effectivePressure
+      real (kind=RKIND), dimension(:), pointer :: muFriction
       integer, dimension(:,:), pointer :: dirichletVelocityMask
-      type (mpas_pool_type), pointer :: meshPool, geometryPool, thermalPool, observationsPool, velocityPool, scratchPool
+      type (mpas_pool_type), pointer :: meshPool, geometryPool, thermalPool, observationsPool, velocityPool, scratchPool, hydroPool
       real (kind=RKIND), pointer :: config_sea_level, config_ice_density, config_ocean_density
       integer :: iCell
       integer :: err
@@ -770,10 +813,6 @@ subroutine li_velocity_external_write_albany_mesh(domain)
          call mpas_log_write("config_velocity solver needs to be set to 'FO' for config_write_albany_ascii_mesh to work.", &
             MPAS_LOG_CRIT)
       endif
-      ! check nProcs
-      if (domain % dminfo % nProcs /= 1) then
-         call mpas_log_write("config_write_albany_ascii_mesh currently only works on 1 processor.", MPAS_LOG_CRIT)
-      endif
       ! check nBlocks
       if (domain % dminfo % total_blocks /= 1) then
          call mpas_log_write("config_write_albany_ascii_mesh currently only works on 1 block per processor.", MPAS_LOG_CRIT)
@@ -784,6 +823,7 @@ subroutine li_velocity_external_write_albany_mesh(domain)
       call mpas_pool_get_subpool(domain % blocklist % structs, 'mesh', meshPool)
       call mpas_pool_get_subpool(domain % blocklist % structs, 'geometry', geometryPool)
       call mpas_pool_get_subpool(domain % blocklist % structs, 'thermal', thermalPool)
+      call mpas_pool_get_subpool(domain % blocklist % structs, 'hydro', hydroPool)
       call mpas_pool_get_subpool(domain % blocklist % structs, 'velocity', velocityPool)
       call mpas_pool_get_subpool(domain % blocklist % structs, 'observations', observationsPool)
       call mpas_pool_get_subpool(domain % blocklist % structs, 'scratch', scratchPool)
@@ -805,12 +845,17 @@ subroutine li_velocity_external_write_albany_mesh(domain)
 
       ! Velocity variables
       call mpas_pool_get_array(velocityPool, 'beta', beta)
-      call mpas_pool_get_array(velocityPool, 'floatingEdges', floatingEdges)
+      call mpas_pool_get_array(velocityPool, 'muFriction', muFriction)
       call mpas_pool_get_array(velocityPool, 'dirichletVelocityMask', dirichletVelocityMask, timeLevel = 1)
       call mpas_pool_get_array(velocityPool, 'stiffnessFactor', stiffnessFactor)
 
       ! Thermal variables
       call mpas_pool_get_array(thermalPool, 'temperature', temperature)
+      call mpas_pool_get_array(thermalPool, 'surfaceAirTemperature', surfaceAirTemperature)
+      call mpas_pool_get_array(thermalPool, 'basalHeatFlux', basalHeatFlux)
+
+      ! hydro variables
+      call mpas_pool_get_array(hydroPool, 'effectivePressure', effectivePressure)
 
       ! Observation variables
       call mpas_pool_get_array(observationsPool, 'observedSurfaceVelocityX', observedSurfaceVelocityX)
@@ -824,7 +869,7 @@ subroutine li_velocity_external_write_albany_mesh(domain)
 
       !----
 
-      ! Calculate diagnostic variables to get 1. lowerSurface, 2. mask fields 3. floatingedges and updated edgemask.
+      ! Calculate diagnostic variables to get 1. lowerSurface, 2. mask fields 3. updated edgemask.
       ! We could call diagnostic_solve_before_velocity to do all that, but the way
       ! code is currently organized, that would be a circular dependency.a
 
@@ -837,20 +882,23 @@ subroutine li_velocity_external_write_albany_mesh(domain)
          lowerSurface = bedTopography
       end where
 
-      floatingEdges = li_mask_is_floating_ice_int(edgeMask)
-      call li_calculate_extrapolate_floating_edgemask(meshPool, vertexMask, floatingEdges)
-
+      ! Ensure BMB uncertainty is 0 for grounded ice (and no ice locations)
+      where (.not. (li_mask_is_floating_ice(cellMask)))
+         floatingBasalMassBalUncertainty = 0.0_RKIND
+      end where
 
       ! Create FEM mesh
       call mpas_log_write("Generating new external velocity solver FEM grid.", flushNow=.true.)
       call generate_fem_grid(config_velocity_solver, vertexMask, cellMask, dirichletVelocityMask, &
-              floatingEdges, layerThicknessFractions, lowerSurface, thickness, err)
+              layerThicknessFractions, lowerSurface, thickness, err)
 
       ! call the C++ routine to write the mesh
       call mpas_log_write("Writing Albany ASCII mesh.", flushNow=.true.)
       call write_ascii_mesh(indexToCellID, bedTopography, lowerSurface, &
               beta, temperature, &
+              surfaceAirTemperature, basalHeatFlux, &
               stiffnessFactor, &
+              effectivePressure, muFriction, &
               thickness, thicknessUncertainty, &
               sfcMassBal, sfcMassBalUncertainty, &
               floatingBasalMassBal, floatingBasalMassBalUncertainty, &
@@ -954,14 +1002,14 @@ subroutine li_velocity_external_write_albany_mesh(domain)
 !
 !-----------------------------------------------------------------------
 
-   subroutine generate_fem_grid(config_velocity_solver, vertexMask, cellMask, dirichletVelocityMask, floatingEdges, &
+   subroutine generate_fem_grid(config_velocity_solver, vertexMask, cellMask, dirichletVelocityMask, &
               layerThicknessFractions, lowerSurface, thickness, err)
 
       !-----------------------------------------------------------------
       ! input variables
       !-----------------------------------------------------------------
       character (len=StrKIND), pointer :: config_velocity_solver
-      integer, pointer, dimension(:), intent(in) :: vertexMask, cellMask, floatingEdges
+      integer, pointer, dimension(:), intent(in) :: vertexMask, cellMask
       integer, pointer, dimension(:,:), intent(in) :: dirichletVelocityMask
       real(kind=RKIND), pointer, dimension(:), intent(in) :: layerThicknessFractions, &
              lowerSurface, thickness
@@ -984,7 +1032,7 @@ subroutine li_velocity_external_write_albany_mesh(domain)
 
 #if defined(USE_EXTERNAL_L1L2) || defined(USE_EXTERNAL_FIRSTORDER) || defined(USE_EXTERNAL_STOKES)
           call mpas_timer_start("velocity_solver_compute_2d_grid")
-          call velocity_solver_compute_2d_grid(vertexMask, cellMask, dirichletVelocityMask, floatingEdges)
+          call velocity_solver_compute_2d_grid(vertexMask, cellMask, dirichletVelocityMask)
           call mpas_timer_stop("velocity_solver_compute_2d_grid")
 #else
           call mpas_log_write("To run with an external velocity solver you must compile MPAS with one.", MPAS_LOG_ERR)
@@ -1008,7 +1056,7 @@ subroutine li_velocity_external_write_albany_mesh(domain)
           case ('FO') ! ===============================================
 #ifdef USE_EXTERNAL_FIRSTORDER
               call mpas_timer_start("velocity_solver_extrude_3d_grid")
-              call velocity_solver_extrude_3d_grid(layerThicknessFractions, lowerSurface, thickness)
+              call velocity_solver_extrude_3d_grid(layerThicknessFractions)
               call mpas_timer_stop("velocity_solver_extrude_3d_grid")
               call mpas_timer_start("velocity_solver_init_FO")
               call velocity_solver_init_FO(layerThicknessFractions)
